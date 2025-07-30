@@ -1,0 +1,87 @@
+variables:
+  MACHINE_CIBLE:
+    value: vma-prddck-104
+
+
+default:
+  image: nexus.m2m.axione.fr/aio/axalpine:2-stable
+
+
+stages:
+  - build
+  - deploy
+
+
+build:
+  stage: build
+  image: docker:stable
+  script:
+    - docker login -u $NEXUS_USER -p $NEXUS_PASSWORD $NEXUS_URL
+    - docker build -t $NEXUS_URL/axione-reseau/tb-ws-python:$DOCKER_TAG -f distribution/Dockerfile .
+    - docker push $NEXUS_URL/axione-reseau/tb-ws-python:$DOCKER_TAG
+  rules:
+    - if: $CI_COMMIT_TAG
+      variables:
+        DOCKER_TAG: $CI_COMMIT_TAG
+    - if: $CI_MERGE_REQUEST_ID
+      variables:
+        DOCKER_TAG: $CI_COMMIT_REF_SLUG
+
+
+"deployTag":
+  stage: deploy
+  script:
+      - deploy -m $MACHINE_CIBLE
+  environment:
+    name: $ENVIRONMENT_NAME
+    url: $ENVIRONMENT_URL
+  tags:
+    - Salt_Deploy
+  rules:
+    - if: $CI_COMMIT_TAG
+      variables:
+        SERVICE_NAME: tb-ws-python
+        DOCKER_TAG: $CI_COMMIT_TAG
+        ENVIRONMENT_NAME: prod/tb-ws-python
+        ENVIRONMENT_URL: tb-ws-python.m2m.axione.fr
+
+
+"deployMerge":
+  stage: deploy
+  script:
+    - deploy -m $MACHINE_CIBLE
+  environment:
+      name: $ENVIRONMENT_NAME
+      url: $ENVIRONMENT_URL
+      on_stop: stopDeployMerge
+      auto_stop_in: 1 week
+  tags:
+    - Salt_Deploy
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+      variables:
+        SERVICE_NAME: tb-ws-python-$CI_COMMIT_REF_SLUG
+        DOCKER_TAG: $CI_COMMIT_REF_SLUG
+        ENVIRONMENT_NAME: merge/tb-ws-python-$CI_COMMIT_REF_SLUG
+        ENVIRONMENT_URL: tb-ws-python-$CI_COMMIT_REF_SLUG.m2m.axione.fr
+
+
+stopDeployMerge:
+  stage: deploy
+  script:
+    - deploy -s stop_deployment -m $MACHINE_CIBLE
+  environment:
+    name: $ENVIRONMENT_NAME
+    url: $ENVIRONMENT_URL
+    action: stop
+  tags:
+    - Salt_Deploy
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+      when: manual
+      variables:
+        SERVICE_NAME: tb-ws-python-$CI_COMMIT_REF_SLUG
+        DOCKER_TAG: $CI_COMMIT_REF_SLUG
+        ENVIRONMENT_NAME: merge/tb-ws-python-$CI_COMMIT_REF_SLUG
+        ENVIRONMENT_URL: tb-ws-python-$CI_COMMIT_REF_SLUG.m2m.axione.fr
+

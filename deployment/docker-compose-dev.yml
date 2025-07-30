@@ -1,0 +1,18 @@
+# VERSION DOCKER
+version: "3"
+
+# SERVICES
+services:
+  
+  # PYTHON
+  tb-ws-python:
+    container_name: tb-ws-python
+    build:
+      context: .
+      dockerfile: ../distribution/Dockerfile-dev
+    restart: always
+    volumes:
+      - '../product:/app'
+    ports:
+      - '5000:5000'
+    

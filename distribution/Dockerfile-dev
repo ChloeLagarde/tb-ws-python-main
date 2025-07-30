@@ -1,0 +1,28 @@
+FROM python:3.9
+
+RUN apt update && \
+    apt install -y -q openssh-client snmp mariadb-client dnsutils net-tools iputils-ping nano
+
+RUN pip install flask
+RUN pip install python-dotenv
+RUN pip install flask-restx
+RUN pip install requests
+RUN pip install zeep
+RUN pip install urllib3
+RUN pip install mysql.connector
+RUN pip install simple_salesforce
+RUN pip install pexpect
+RUN pip install paramiko
+
+RUN mkdir -p /etc/ssh && \
+    ssh-keygen -t rsa -b 2048 -f /etc/ssh/ssh_host_rsa_key -N "" && \
+    ssh-keygen -t ecdsa -f /etc/ssh/ssh_host_ecdsa_key -N "" && \
+    ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
+
+WORKDIR /app
+
+USER nobody
+EXPOSE 5000
+
+CMD ["python3", "-m", "flask", "run", "--host=0.0.0.0"]
+

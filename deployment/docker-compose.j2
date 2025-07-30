@@ -1,0 +1,8 @@
+version: '3'
+
+services:
+  tb-ws-python:
+    image: nexus.m2m.axione.fr/axione-reseau/tb-ws-python:{{ DOCKER_TAG }}
+    restart: unless-stopped
+    ports:
+      - "{{ DOCKER_PORT }}:5000"

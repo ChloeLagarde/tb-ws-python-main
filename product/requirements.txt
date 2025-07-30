@@ -1,0 +1,12 @@
+flask
+python-dotenv
+flask-restx
+requests
+zeep
+urllib3
+mysql.connector
+simple_salesforce
+pexpect
+paramiko
+pyyaml
+Jinja2

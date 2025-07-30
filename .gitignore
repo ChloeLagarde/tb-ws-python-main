@@ -1,0 +1,8 @@
+**/__pycache__/
+.vscode/
+.idea/
+venv/
+.env/
+
+# Essonne Numérique
+**/essonne-numerique/
