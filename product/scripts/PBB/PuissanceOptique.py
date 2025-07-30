@@ -121,15 +121,12 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                 alarm_match = re.search(r'Detected Alarms:\s*([^\n]+)', output)
                 rx_threshold_match = re.search(r'Rx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
                 tx_threshold_match = re.search(r'Tx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
-                led_state_match = re.search(r'LED State:\s*([^\n]+)', output)
-                laser_state_match = re.search(r'Laser State:\s*([^\n]+)', output)
-                part_number_match = re.search(r'Part Number\s*:\s*([^\n]+)', output)
-                
-                # Mise à jour des résultats
+
+                # Extraction des valeurs
                 if rx_match:
-                    result['rx'] = f"{rx_match.group(1)} dBm"
+                    result['rx'] = rx_match.group(1).strip()
                 if tx_match:
-                    result['tx'] = f"{tx_match.group(1)} dBm"
+                    result['tx'] = tx_match.group(1).strip()
                 if pid_match:
                     result['pid'] = pid_match.group(1).strip()
                 if optics_type_match:
@@ -142,13 +139,8 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                     result['wavelength'] = wavelength_match.group(1).strip()
                 if alarm_match:
                     result['alarm_status'] = alarm_match.group(1).strip()
-                if led_state_match:
-                    result['led_state'] = led_state_match.group(1).strip()
-                if laser_state_match:
-                    result['laser_state'] = laser_state_match.group(1).strip()
-                if part_number_match:
-                    result['part_number'] = part_number_match.group(1).strip()
-                    
+                
+                # Extraction des seuils
                 if rx_threshold_match:
                     result['rx_threshold_high'] = rx_threshold_match.group(1).strip()
                     result['rx_threshold_low'] = rx_threshold_match.group(2).strip()
@@ -317,7 +309,6 @@ def get_bundle_info(final_host: str, intermediate_host: str) -> Dict[str, Dict]:
         results = parse_bundle_output(output)
         
     except Exception as e:
-        print(f"Erreur lors de la récupération des informations bundle: {str(e)}")
         results = {}
     
     return results
@@ -498,7 +489,7 @@ def close_connection(hostname: str) -> None:
             session.close()
             del ssh_connections[hostname]
         except Exception as e:
-            print(f"Erreur lors de la fermeture de la connexion SSH pour {hostname}: {str(e)}")
+            pass
 
 def close_all_connections() -> None:
     """Ferme toutes les connexions SSH"""
@@ -509,68 +500,3 @@ def close_all_connections() -> None:
     # Réinitialiser aussi les connexions finales
     global final_connections
     final_connections = {}
-
-if __name__ == "__main__":
-    print("=== TEST DE RÉCUPÉRATION DES INFORMATIONS BUNDLE ===\n")
-    
-    # Paramètres de test
-    intermediate_host = "vma-prddck-104.pau"
-    final_host = "pbb-man72-01.bcb.axione.fr"
-    
-    print(f"Connexion via {intermediate_host} vers {final_host}")
-    print("Récupération des informations bundle en cours...\n")
-    
-    try:
-        # Test de la fonction get_bundle_info
-        bundle_info = get_bundle_info(final_host, intermediate_host)
-        
-        if bundle_info:
-            print("✅ Informations bundle récupérées avec succès!\n")
-            
-            # Affichage du résumé formaté
-            print(format_bundle_summary(bundle_info))
-            
-            # Affichage détaillé des données brutes
-            print("=== DONNÉES DÉTAILLÉES ===\n")
-            for bundle_name, data in bundle_info.items():
-                print(f"Bundle: {bundle_name}")
-                print(f"  - Status: {data['status']}")
-                print(f"  - MAC Address: {data['mac_address']}")
-                print(f"  - LACP Status: {data['lacp_status']}")
-                print(f"  - BFD IPv4 State: {data['bfd_ipv4_state']}")
-                print(f"  - Liens: {data['local_links_active']} actif(s) / {data['local_links_configured']} configuré(s)")
-                print(f"  - Bande passante: {data['local_bandwidth_effective']}")
-                
-                if data['ports']:
-                    print("  - Ports configurés:")
-                    for port in data['ports']:
-                        print(f"    * {port['port']}: {port['state']} - {port['device']} - {port['bandwidth']} kbps")
-                else:
-                    print("  - Aucun port configuré")
-                print()
-            
-            # Test spécifique pour vérifier les regex
-            print("=== VÉRIFICATION DES REGEX ===")
-            for bundle_name, data in bundle_info.items():
-                print(f"{bundle_name}:")
-                print(f"  Status extrait: '{data['status']}'")
-                print(f"  Liens extraits: {data['local_links_active']}/{data['local_links_standby']}/{data['local_links_configured']}")
-                print(f"  Bande passante: {data['local_bandwidth_effective']} / {data['local_bandwidth_available']}")
-                print(f"  Nombre de ports: {len(data['ports'])}")
-                print()
-                
-        else:
-            print("❌ Aucune information bundle récupérée.")
-            print("Vérifiez la connectivité et les paramètres de connexion.")
-            
-    except Exception as e:
-        print(f"❌ Erreur lors du test: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    
-    finally:
-        # Nettoyage des connexions
-        print("\n=== NETTOYAGE ===")
-        close_all_connections()
-        print("Connexions SSH fermées.")
-        print("Test terminé.")

@@ -7,82 +7,11 @@ import time
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Union
-
-# Imports flexibles pour différents environnements
-try:
-    from scripts.FindDNS import find_dns
-except ImportError:
-    try:
-        from FindDNS import find_dns
-    except ImportError:
-        print("⚠️  Module FindDNS non trouvé, utilisation d'une fonction par défaut")
-        def find_dns(hostname):
-            return f"{hostname}.bcb.axione.fr"
-
-try:
-    from scripts.Version_Alcatel_Telco_One_Access import equipment_patterns
-except ImportError:
-    try:
-        from Version_Alcatel_Telco_One_Access import equipment_patterns
-    except ImportError:
-        print("⚠️  Module equipment_patterns non trouvé, utilisation de patterns par défaut")
-        equipment_patterns = [
-            {"pattern": r'Cisco IOS XR Software \(8000\)', "model": "Cisco 8201-32FH", "type": "Router"},
-            {"pattern": r'Cisco', "model": "Cisco Equipment", "type": "Router"}
-        ]
-
-try:
-    from scripts.PBB.testOp import *
-except ImportError:
-    try:
-        from testOp import *
-    except ImportError:
-        print("⚠️  Module testOp non trouvé")
-        # Fonctions par défaut
-        def get_optical_power_batch(final_host, ports, intermediate_host):
-            return {port: {
-                'signal_optique_rx': 'N/A',
-                'signal_optique_tx': 'N/A',
-                'type_sfp': {'PID': 'N/A', 'Optics type': 'N/A', 'Name': 'N/A', 'Part Number': 'N/A'},
-                'fec_state': 'N/A', 'wavelength': 'N/A', 'alarm_status': 'N/A',
-                'led_state': 'N/A', 'laser_state': 'N/A',
-                'threshold': {'rx_high': 'N/A', 'rx_low': 'N/A', 'tx_high': 'N/A', 'tx_low': 'N/A'}
-            } for port in ports}
-        
-        def get_optical_power(final_host, port, intermediate_host):
-            return {'rx': 'N/A', 'tx': 'N/A', 'pid': 'N/A', 'optics_type': 'N/A', 'name': 'N/A',
-                   'part_number': 'N/A', 'fec_state': 'N/A', 'wavelength': 'N/A', 'alarm_status': 'N/A',
-                   'led_state': 'N/A', 'laser_state': 'N/A', 'rx_threshold_high': 'N/A', 'rx_threshold_low': 'N/A',
-                   'tx_threshold_high': 'N/A', 'tx_threshold_low': 'N/A'}
-        
-        def get_bundle_info(final_host, intermediate_host):
-            return {}
-        
-        def close_all_connections():
-            pass
-
-try:
-    from scripts.SnmpRequests import snmp_request
-except ImportError:
-    try:
-        from SnmpRequests import snmp_request
-    except ImportError:
-        print("⚠️  Module SnmpRequests non trouvé, utilisation d'une fonction par défaut")
-        def snmp_request(hostname, oid):
-            return f"No SNMP data available for {hostname} - {oid}"
-
-try:
-    from scripts.PBB.SpectrumPBB import *
-except ImportError:
-    try:
-        from SpectrumPBB import *
-    except ImportError:
-        print("⚠️  Module SpectrumPBB non trouvé")
-        def get_pbb_monitoring_info(hostname):
-            return {
-                "spectrum": f"Module Spectrum non disponible pour {hostname}",
-                "cacti": f"Module Cacti non disponible pour {hostname}"
-            }
+from scripts.FindDNS import find_dns
+from scripts.Version_Alcatel_Telco_One_Access import equipment_patterns
+from scripts.PBB.PuissanceOptique import *
+from scripts.SnmpRequests import snmp_request
+from scripts.PBB.SpectrumPBB import *
 
 @dataclass
 class SNMPResponse:
@@ -112,8 +41,8 @@ class NetworkEquipment:
         self.dns_complet = find_dns(hostname)
         self.ip_address = socket.gethostbyname(self.dns_complet) if self.dns_complet else "DNS non résolu"
         self.intermediate_host = "vma-prddck-104.pau"
-        self.max_workers = max_workers  # Pour la parallélisation
-        self._snmp_cache = {}  # Cache pour les requêtes SNMP
+        self.max_workers = max_workers
+        self._snmp_cache = {}
 
     def _snmp_walk(self, oid: str) -> Optional[str]:
         """SNMP walk avec mise en cache"""
@@ -262,7 +191,6 @@ class NetworkEquipment:
             bundle_info = get_bundle_info(self.dns_complet, self.intermediate_host)
             return bundle_info
         except Exception as e:
-            print(f"Erreur lors de la récupération des informations bundle: {str(e)}")
             return {}
 
     def _get_port_bundle_info(self, port_number: str, bundle_data: Dict[str, Dict]) -> Dict[str, str]:
@@ -273,13 +201,11 @@ class NetworkEquipment:
             "state": "N/A"
         }
         
-        # Normaliser le format du port pour la comparaison
         port_normalized = port_number.replace("Hu", "").replace("0/0/0/", "")
         
         for bundle_name, data in bundle_data.items():
             for port in data.get('ports', []):
                 port_name = port.get('port', '')
-                # Normaliser le nom du port du bundle
                 port_name_normalized = port_name.replace("Hu", "").replace("0/0/0/", "")
                 
                 if port_normalized == port_name_normalized:
@@ -291,17 +217,6 @@ class NetworkEquipment:
                     break
                     
         return bundle_info
-
-    def get_optical_power_values_batch(self, ports: List[str]) -> Dict[str, Dict]:
-        """Récupère les puissances optiques pour plusieurs ports en une seule connexion SSH"""
-        try:
-            # Utilise la version optimisée qui garde la connexion ouverte
-            optical_data = get_optical_power_batch(self.dns_complet, ports, self.intermediate_host)
-            return optical_data
-        except Exception as e:
-            print(f"Erreur lors de la récupération batch des puissances optiques: {e}")
-            # Retourne des valeurs par défaut pour tous les ports
-            return {port: self._get_default_optical_values() for port in ports}
 
     def _get_default_optical_values(self) -> Dict:
         """Retourne les valeurs optiques par défaut"""
@@ -326,6 +241,14 @@ class NetworkEquipment:
                 "tx_low": "N/A"
             }
         }
+
+    def get_optical_power_values_batch(self, ports: List[str]) -> Dict[str, Dict]:
+        """Récupère les puissances optiques pour plusieurs ports en une seule connexion SSH"""
+        try:
+            optical_data = get_optical_power_batch(self.dns_complet, ports, self.intermediate_host)
+            return optical_data
+        except Exception as e:
+            return {port: self._get_default_optical_values() for port in ports}
 
     def get_optical_power_values(self) -> Dict[str, Union[str, Dict[str, str]]]:
         """Version compatible pour un seul port (rétrocompatibilité)"""
@@ -364,11 +287,10 @@ class NetworkEquipment:
                 "ip_address": self.ip_address,
                 "dns_complet": self.dns_complet if self.dns_complet else "DNS non résolu"
             },
-            "lags": [],  # Nouvelle section pour les bundles
+            "lags": [],
             "ports": []  
         }
 
-        # Récupération des informations de monitoring (Spectrum et Cacti)
         try:
             monitoring_info = get_pbb_monitoring_info(self.hostname)
             info["equipment_info"].update(monitoring_info)
@@ -376,10 +298,8 @@ class NetworkEquipment:
             info["equipment_info"]["spectrum"] = f"Erreur lors de la récupération Spectrum: {str(e)}"
             info["equipment_info"]["cacti"] = f"Erreur lors de la récupération Cacti: {str(e)}"
 
-        # Récupération des informations des bundles
         bundle_data = self.get_bundle_info_equipment()
         
-        # Formatage des informations LAG
         for bundle_name, data in bundle_data.items():
             lag_info = {
                 "bundle_name": bundle_name,
@@ -395,11 +315,9 @@ class NetworkEquipment:
             
             info["lags"].append(lag_info)
 
-        # Récupération parallèle de toutes les données SNMP
         oids_to_fetch = list(self.OIDS.values())
         snmp_results = self._parallel_snmp_walks(oids_to_fetch)
         
-        # Traitement du type d'équipement
         type_output = snmp_results.get(self.OIDS['type'])
         type_info = self._parse_snmp_output_with_debug(type_output, 'type') if type_output else []
         
@@ -415,14 +333,12 @@ class NetworkEquipment:
             
             info["equipment_info"]["Version"] = version_str
 
-        # Parsing des autres données SNMP
         interface_status = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['interface_status'], ''), 'interface_status')
         interface_admin_status = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['interface_admin_status'], ''), 'interface_admin_status')
         interface_desc = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['interface_desc'], ''), 'interface_desc')
         physical_port = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['physical_port'], ''), 'physical_port')
         port_alias = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['port_alias'], ''), 'port_alias')
 
-        # Création des dictionnaires indexés
         status_dict = {item['index']: item for item in interface_status if item['index']}
         admin_status_dict = {item['index']: item for item in interface_admin_status if item['index']}
         desc_dict = {item['index']: item for item in interface_desc if item['index']}
@@ -433,7 +349,6 @@ class NetworkEquipment:
         if self.slot:
             target_port = f"{self.ip}/{self.slot}" if self.ip else None
             
-        # Collecte des ports UP pour traitement batch
         ports_up = []
         ports_info_temp = []
         
@@ -461,43 +376,42 @@ class NetworkEquipment:
             if bandwidth == "Unknown":
                 continue
                 
-            # Récupération des informations de bundle pour ce port
             bundle_info = self._get_port_bundle_info(port_number, bundle_data)
                 
             port_info = {
                 "port": port_number,
-                "bundle": bundle_info["bundle"],
-                "status_bundle": bundle_info["status_bundle"],
-                "state": bundle_info["state"],
                 "bandwidth": bandwidth,
                 "status": status,
                 "admin_status": admin_status,
                 "physical_address": physical_address,
                 "description": alias,
-                "index": idx  # Pour correspondance ultérieure
+                "index": idx
             }
+            
+            if bundle_info["bundle"] != "N/A":
+                port_info.update({
+                    "bundle": bundle_info["bundle"],
+                    "status_bundle": bundle_info["status_bundle"],
+                    "state": bundle_info["state"]
+                })
             
             ports_info_temp.append(port_info)
             
             if status == "up":
                 ports_up.append(port_number)
 
-        # Récupération batch des puissances optiques pour tous les ports UP
         optical_values_batch = {}
         if ports_up and self.dns_complet and self.intermediate_host:
             optical_values_batch = self.get_optical_power_values_batch(ports_up)
 
-        # Assemblage final des informations de port
         for port_info in ports_info_temp:
             port_number = port_info["port"]
             
-            # Récupération des valeurs optiques ou valeurs par défaut
             if port_info["status"] == "up" and port_number in optical_values_batch:
                 optical_values = optical_values_batch[port_number]
             else:
                 optical_values = self._get_default_optical_values()
             
-            # Ajout des valeurs optiques au port info
             port_info.update({
                 "signal_optique_rx": optical_values['signal_optique_rx'],
                 "signal_optique_tx": optical_values['signal_optique_tx'],
@@ -510,7 +424,6 @@ class NetworkEquipment:
                 "laser_state": optical_values['laser_state']    
             })
             
-            # Retirer l'index temporaire
             port_info.pop('index', None)
             
             info["ports"].append(port_info)
@@ -533,23 +446,4 @@ class NetworkEquipment:
             return [port for port in ports if port["port"].startswith(target_ip)]
 
     def print_equipment_info(self):
-        print(json.dumps(self.get_equipment_info(), indent=2))
-
-if __name__ == "__main__":
-    try:
-        # Création de l'instance NetworkEquipment
-        equipment = NetworkEquipment(hostname="pbb-man72-01")
-        
-        # Récupération et affichage des informations en JSON
-        equipment_info = equipment.get_equipment_info()
-        print(json.dumps(equipment_info, indent=2, ensure_ascii=False))
-        
-    except Exception as e:
-        print(f"Erreur: {str(e)}")
-    
-    finally:
-        # Nettoyage des connexions
-        try:
-            close_all_connections()
-        except:
-            pass
+        return json.dumps(self.get_equipment_info(), indent=2)
