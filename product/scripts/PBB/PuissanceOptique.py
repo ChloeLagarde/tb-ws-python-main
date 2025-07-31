@@ -110,7 +110,7 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                 # Parsing des résultats
                 result = default_result.copy()
                 
-                # === FORMAT 1: Tableau avec lanes (comme pbb-man72-01) ===
+                #première tentative (tableau)
                 lane_match = re.search(r'Lane\s+Laser Bias\s+TX Power\s+RX Power.*?\n(.*?)(?=\n\s*Temperature|\n\s*$|\Z)', output, re.DOTALL)
                 if lane_match:
                     lanes_data = lane_match.group(1)
@@ -136,7 +136,7 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                         result['tx'] = "[" + ", ".join(tx_powers) + "]"
                         result['rx'] = "[" + ", ".join(rx_powers) + "]"
                 else:
-                    # === FORMAT 2: Lignes individuelles (comme pbb-th275-01) ===
+                    # deuxième tentative (lignes individuelles)
                     # RX Power
                     rx_match = re.search(r'RX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
                     if rx_match:
@@ -147,7 +147,7 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                     if tx_match:
                         result['tx'] = f"{tx_match.group(1)} dBm"
 
-                # === Autres informations communes aux deux formats ===
+                #autres infos
                 pid_match = re.search(r'PID\s*:\s*([^\n]+)', output)
                 if pid_match:
                     result['pid'] = pid_match.group(1).strip()
@@ -275,258 +275,6 @@ def get_optical_power(final_host: str, port: str, intermediate_host: str) -> Dic
             'laser_state': 'N/A'
         }
 
-def get_bundle_info(final_host: str, intermediate_host: str) -> Dict[str, Dict]:
-    """
-    Récupère les informations des bundles via la commande 'show bundle'.
-    Retourne un dictionnaire {bundle_name: bundle_data}
-    """
-    results = {}
-    
-    try:
-        intermediate_user = 'cag'
-        intermediate_password = 'SpaciumAevum043?'
-        final_user = 'provauto'
-        final_password = 'srv-pia64-l'
-
-        # Réutilisation de la connexion intermédiaire
-        if intermediate_host in ssh_connections and ssh_connections[intermediate_host]['session'].isalive():
-            session = ssh_connections[intermediate_host]['session']
-        else:
-            session = pexpect.spawn(f'ssh -o StrictHostKeyChecking=no {intermediate_user}@{intermediate_host}', timeout=30)
-            i = session.expect(['password:', pexpect.TIMEOUT], timeout=30)
-            if i == 1:
-                raise Exception(f"Timeout en attendant le mot de passe pour {intermediate_host}")
-            session.sendline(intermediate_password)
-            
-            prompt_patterns = [r'\$ ', r'# ', pexpect.TIMEOUT]
-            if session.expect(prompt_patterns, timeout=30) == 2:
-                raise Exception(f"Timeout en attendant le prompt sur {intermediate_host}")
-
-            ssh_connections[intermediate_host] = {
-                'session': session,
-                'prompt_pattern': session.match.group(0) if session.match else r'\$ '
-            }
-
-        # Connexion à l'équipement final
-        connection_key = f"{intermediate_host}_{final_host}"
-        
-        if connection_key not in final_connections or not session.isalive():
-            final_host_command = f'ssh -o StrictHostKeyChecking=no {final_user}@{final_host}'
-            session.sendline(final_host_command)
-
-            session.expect(r'\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*', timeout=60)
-            session.send(' ')
-            
-            i = session.expect([r'Password:', r'password:', pexpect.TIMEOUT], timeout=60)
-            if i == 2:
-                raise Exception(f"Timeout en attendant le mot de passe pour {final_host}")
-            session.sendline(final_password)
-
-            prompt_patterns = [r'RP/0/RP0/CPU0:.*#', r'.*#', pexpect.TIMEOUT]
-            if session.expect(prompt_patterns, timeout=30) == 2:
-                raise Exception(f"Timeout en attendant le prompt Cisco sur {final_host}")
-                
-            final_connections[connection_key] = True
-
-        # Exécution de la commande show bundle
-        bundle_command = 'show bundle'
-        session.sendline(bundle_command)
-        
-        prompt_pattern = r'RP/0/RP0/CPU0:.*#'
-        output = ""
-        
-        # Collecte de la sortie complète
-        start_time = time.time()
-        while True:
-            index = session.expect([prompt_pattern, '--More--', 'Press any key to continue', pexpect.TIMEOUT], timeout=15)
-            output += session.before.decode('utf-8', errors='replace')
-            
-            if index == 0:
-                break
-            elif index in [1, 2]:
-                session.send(' ')
-            elif index == 3:
-                break
-            
-            # Protection contre les boucles infinies
-            if time.time() - start_time > 30:
-                break
-
-        # Parsing de la sortie
-        results = parse_bundle_output(output)
-        
-    except Exception as e:
-        results = {}
-    
-    return results
-
-def parse_bundle_output(output: str) -> Dict[str, Dict]:
-    """
-    Parse la sortie de la commande 'show bundle' et extrait les informations.
-    """
-    results = {}
-    
-    # Division de la sortie par bundles
-    bundle_blocks = re.split(r'\n(?=Bundle-Ether\d+)', output)
-    
-    for block in bundle_blocks:
-        if not block.strip() or 'Bundle-Ether' not in block:
-            continue
-            
-        bundle_info = parse_single_bundle(block)
-        if bundle_info:
-            bundle_name = bundle_info['name']
-            results[bundle_name] = bundle_info
-    
-    return results
-
-def parse_single_bundle(block: str) -> Optional[Dict]:
-    """
-    Parse les informations d'un seul bundle.
-    """
-    lines = block.strip().split('\n')
-    if not lines:
-        return None
-    
-    # Extraction du nom du bundle
-    bundle_match = re.match(r'(Bundle-Ether\d+)', lines[0])
-    if not bundle_match:
-        return None
-    
-    bundle_name = bundle_match.group(1)
-    
-    # Initialisation des données du bundle
-    bundle_data = {
-        'name': bundle_name,
-        'status': 'N/A',
-        'local_links_active': 'N/A',
-        'local_links_standby': 'N/A',
-        'local_links_configured': 'N/A',
-        'local_bandwidth_effective': 'N/A',
-        'local_bandwidth_available': 'N/A',
-        'mac_address': 'N/A',
-        'lacp_status': 'N/A',
-        'bfd_ipv4_state': 'N/A',
-        'ports': []
-    }
-    
-    # Parsing des informations principales
-    for line in lines:
-        line = line.strip()
-        
-        # Status
-        status_match = re.search(r'Status:\s+(.+)', line)
-        if status_match:
-            bundle_data['status'] = status_match.group(1).strip()
-        
-        # Local links
-        links_match = re.search(r'Local links <active/standby/configured>:\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)', line)
-        if links_match:
-            bundle_data['local_links_active'] = links_match.group(1)
-            bundle_data['local_links_standby'] = links_match.group(2)
-            bundle_data['local_links_configured'] = links_match.group(3)
-        
-        # Local bandwidth
-        bandwidth_match = re.search(r'Local bandwidth <effective/available>:\s+(\d+)\s*\((\d+)\)\s*kbps', line)
-        if bandwidth_match:
-            bundle_data['local_bandwidth_effective'] = f"{bandwidth_match.group(1)} kbps"
-            bundle_data['local_bandwidth_available'] = f"{bandwidth_match.group(2)} kbps"
-        
-        # MAC address
-        mac_match = re.search(r'MAC address \(source\):\s+([0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})', line)
-        if mac_match:
-            bundle_data['mac_address'] = mac_match.group(1)
-        
-        # LACP status
-        if 'LACP:' in line:
-            lacp_match = re.search(r'LACP:\s+(.+)', line)
-            if lacp_match:
-                bundle_data['lacp_status'] = lacp_match.group(1).strip()
-        
-        # BFD IPv4 state
-        if 'IPv4 BFD:' in line:
-            # Chercher la ligne "State:" qui suit
-            continue
-        if line.startswith('State:') and 'bfd_ipv4_state' in bundle_data and bundle_data['bfd_ipv4_state'] == 'N/A':
-            state_match = re.search(r'State:\s+(.+)', line)
-            if state_match:
-                bundle_data['bfd_ipv4_state'] = state_match.group(1).strip()
-    
-    # Parsing des ports
-    bundle_data['ports'] = parse_bundle_ports(block)
-    
-    return bundle_data
-
-def parse_bundle_ports(block: str) -> List[Dict[str, str]]:
-    """
-    Parse les informations des ports d'un bundle.
-    """
-    ports = []
-    lines = block.split('\n')
-    
-    # Recherche de la section des ports
-    port_section_started = False
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
-        
-        # Début de la section ports (après les tirets de séparation)
-        if '--------------------' in line and 'Port' in lines[i-1] if i > 0 else False:
-            port_section_started = True
-            continue
-        
-        # Si on est dans la section ports
-        if port_section_started:
-            # Fin de la section (ligne vide ou nouveau bundle)
-            if not line or line.startswith('Bundle-Ether') or 'IPv4 BFD:' in line:
-                break
-            
-            # Skip les lignes de détail des liens ("Link is Active", etc.)
-            if line.startswith('Link is') or line.startswith('LACP') or '--' in line:
-                continue
-            
-            # Parse d'une ligne de port
-            port_match = re.match(r'(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', line)
-            if port_match:
-                port_info = {
-                    'port': port_match.group(1),
-                    'device': port_match.group(2),
-                    'state': port_match.group(3),
-                    'port_id': port_match.group(4),
-                    'bandwidth': port_match.group(5)
-                }
-                ports.append(port_info)
-    
-    return ports
-
-def format_bundle_summary(bundle_data: Dict[str, Dict]) -> str:
-    """
-    Formate un résumé des informations des bundles.
-    """
-    if not bundle_data:
-        return "Aucune information de bundle trouvée."
-    
-    summary = "=== INFORMATIONS DES BUNDLES ===\n\n"
-    
-    for bundle_name, info in bundle_data.items():
-        summary += f"Bundle: {bundle_name}\n"
-        summary += f"  Status: {info['status']}\n"
-        summary += f"  Links actifs/standby/configurés: {info['local_links_active']}/{info['local_links_standby']}/{info['local_links_configured']}\n"
-        summary += f"  Bande passante: {info['local_bandwidth_effective']} (disponible: {info['local_bandwidth_available']})\n"
-        summary += f"  LACP: {info['lacp_status']}\n"
-        summary += f"  BFD IPv4: {info['bfd_ipv4_state']}\n"
-        
-        if info['ports']:
-            summary += "  Ports:\n"
-            for port in info['ports']:
-                summary += f"    - {port['port']}: {port['state']} ({port['bandwidth']} kbps)\n"
-        else:
-            summary += "  Aucun port configuré\n"
-        
-        summary += "\n"
-    
-    return summary
-
 def close_connection(hostname: str) -> None:
     """Ferme une connexion SSH spécifique"""
     if hostname in ssh_connections and ssh_connections[hostname]['session'].isalive():
@@ -536,7 +284,7 @@ def close_connection(hostname: str) -> None:
             session.close()
             del ssh_connections[hostname]
         except Exception as e:
-            pass
+            print(f"Erreur lors de la fermeture de la connexion SSH pour {hostname}: {str(e)}")
 
 def close_all_connections() -> None:
     """Ferme toutes les connexions SSH"""
