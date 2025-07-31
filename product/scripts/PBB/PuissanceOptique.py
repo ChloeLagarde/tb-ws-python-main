@@ -107,8 +107,94 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                     if time.time() - start_time > 15:
                         break
 
-                # Parsing des résultats avec gestion des deux formats
-                result = parse_optical_data(output)
+                # Parsing des résultats
+                result = default_result.copy()
+                
+                # === FORMAT 1: Tableau avec lanes (comme pbb-man72-01) ===
+                lane_match = re.search(r'Lane\s+Laser Bias\s+TX Power\s+RX Power.*?\n(.*?)(?=\n\s*Temperature|\n\s*$|\Z)', output, re.DOTALL)
+                if lane_match:
+                    lanes_data = lane_match.group(1)
+                    tx_powers = []
+                    rx_powers = []
+                    
+                    for line in lanes_data.strip().split('\n'):
+                        if re.match(r'\s*\d+\s+', line):  # Ligne commençant par un numéro de lane
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                # Format attendu: lane, bias, tx_power, rx_power
+                                lane_num = parts[0]
+                                tx_power = parts[2].replace('dBm', '').strip()
+                                rx_power = parts[3].replace('dBm', '').strip()
+                                
+                                try:
+                                    tx_powers.append(f"Lane {lane_num}: {tx_power} dBm")
+                                    rx_powers.append(f"Lane {lane_num}: {rx_power} dBm")
+                                except:
+                                    continue
+                    
+                    if tx_powers and rx_powers:
+                        result['tx'] = "[" + ", ".join(tx_powers) + "]"
+                        result['rx'] = "[" + ", ".join(rx_powers) + "]"
+                else:
+                    # === FORMAT 2: Lignes individuelles (comme pbb-th275-01) ===
+                    # RX Power
+                    rx_match = re.search(r'RX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
+                    if rx_match:
+                        result['rx'] = f"{rx_match.group(1)} dBm"
+                    
+                    # TX Power - essayer plusieurs formats
+                    tx_match = re.search(r'(?:Actual\s+)?TX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
+                    if tx_match:
+                        result['tx'] = f"{tx_match.group(1)} dBm"
+
+                # === Autres informations communes aux deux formats ===
+                pid_match = re.search(r'PID\s*:\s*([^\n]+)', output)
+                if pid_match:
+                    result['pid'] = pid_match.group(1).strip()
+                    
+                optics_type_match = re.search(r'Optics type\s*:\s*([^\n]+)', output)
+                if optics_type_match:
+                    result['optics_type'] = optics_type_match.group(1).strip()
+                    
+                name_match = re.search(r'Name\s*:\s*([^\n]+)', output)
+                if name_match:
+                    result['name'] = name_match.group(1).strip()
+                    
+                fec_match = re.search(r'FEC State:\s*([^\n]+)', output)
+                if fec_match:
+                    result['fec_state'] = fec_match.group(1).strip()
+                    
+                wavelength_match = re.search(r'Wavelength\s*=\s*([^\n]+)', output)
+                if wavelength_match:
+                    result['wavelength'] = wavelength_match.group(1).strip()
+                    
+                alarm_match = re.search(r'Detected Alarms:\s*([^\n]+)', output)
+                if alarm_match:
+                    result['alarm_status'] = alarm_match.group(1).strip()
+                    
+                led_state_match = re.search(r'LED State:\s*([^\n]+)', output)
+                if led_state_match:
+                    result['led_state'] = led_state_match.group(1).strip()
+                    
+                laser_state_match = re.search(r'Laser State:\s*([^\n]+)', output)
+                if laser_state_match:
+                    result['laser_state'] = laser_state_match.group(1).strip()
+                    
+                part_number_match = re.search(r'Part Number\s*:\s*([^\n]+)', output)
+                if part_number_match:
+                    result['part_number'] = part_number_match.group(1).strip()
+                
+                # Thresholds
+                rx_threshold_match = re.search(r'Rx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
+                if rx_threshold_match:
+                    result['rx_threshold_high'] = rx_threshold_match.group(1).strip()
+                    result['rx_threshold_low'] = rx_threshold_match.group(2).strip()
+                    
+                tx_threshold_match = re.search(r'Tx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
+                if tx_threshold_match:
+                    result['tx_threshold_high'] = tx_threshold_match.group(1).strip()
+                    result['tx_threshold_low'] = tx_threshold_match.group(2).strip()
+                
                 results[port] = result
                 
             except Exception as e:
@@ -145,140 +231,6 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
         }
     
     return formatted_results
-
-def parse_optical_data(output: str) -> Dict[str, str]:
-    """
-    Parse les données optiques avec support des deux formats Cisco :
-    - Format avec lanes multiples
-    - Format simple avec valeurs globales
-    """
-    result = {
-        'rx': 'N/A', 
-        'tx': 'N/A',
-        'pid': 'N/A',
-        'optics_type': 'N/A',
-        'name': 'N/A',
-        'fec_state': 'N/A',
-        'wavelength': 'N/A',
-        'alarm_status': 'N/A',
-        'rx_threshold_high': 'N/A',
-        'rx_threshold_low': 'N/A',
-        'tx_threshold_high': 'N/A',
-        'tx_threshold_low': 'N/A',
-        'led_state': 'N/A',
-        'laser_state': 'N/A',
-        'part_number': 'N/A'
-    }
-    
-    # 1. Chercher d'abord le format avec lanes multiples
-    lane_data = parse_lane_data(output)
-    if lane_data:
-        # Format avec lanes - créer un tableau avec toutes les valeurs
-        rx_values = []
-        tx_values = []
-        for lane_num, lane_info in lane_data.items():
-            rx_values.append(f"Lane {lane_num}: {lane_info['rx']}")
-            tx_values.append(f"Lane {lane_num}: {lane_info['tx']}")
-        
-        result['rx'] = "[" + ", ".join(rx_values) + "]"
-        result['tx'] = "[" + ", ".join(tx_values) + "]"
-    else:
-        # 2. Format simple - valeurs globales
-        rx_match = re.search(r'RX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
-        tx_match = re.search(r'Actual TX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
-        
-        if rx_match:
-            result['rx'] = f"{rx_match.group(1)} dBm"
-        if tx_match:
-            result['tx'] = f"{tx_match.group(1)} dBm"
-    
-    # Extraction des autres informations (communes aux deux formats)
-    pid_match = re.search(r'PID\s*:\s*([^\n\r]+)', output)
-    if pid_match:
-        result['pid'] = pid_match.group(1).strip()
-    
-    optics_type_match = re.search(r'Optics type\s*:\s*([^\n\r]+)', output)
-    if optics_type_match:
-        result['optics_type'] = optics_type_match.group(1).strip()
-    
-    name_match = re.search(r'Name\s*:\s*([^\n\r]+)', output)
-    if name_match:
-        result['name'] = name_match.group(1).strip()
-    
-    fec_match = re.search(r'FEC State:\s*([^\n\r]+)', output)
-    if fec_match:
-        result['fec_state'] = fec_match.group(1).strip()
-    
-    wavelength_match = re.search(r'Wavelength\s*=\s*([^\n\r]+)', output)
-    if wavelength_match:
-        result['wavelength'] = wavelength_match.group(1).strip()
-    
-    alarm_match = re.search(r'Detected Alarms:\s*([^\n\r]+)', output)
-    if alarm_match:
-        result['alarm_status'] = alarm_match.group(1).strip()
-    
-    # Seuils de puissance
-    rx_threshold_match = re.search(r'Rx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
-    if rx_threshold_match:
-        result['rx_threshold_high'] = rx_threshold_match.group(1).strip()
-        result['rx_threshold_low'] = rx_threshold_match.group(2).strip()
-    
-    tx_threshold_match = re.search(r'Tx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
-    if tx_threshold_match:
-        result['tx_threshold_high'] = tx_threshold_match.group(1).strip()
-        result['tx_threshold_low'] = tx_threshold_match.group(2).strip()
-    
-    led_state_match = re.search(r'LED State:\s*([^\n\r]+)', output)
-    if led_state_match:
-        result['led_state'] = led_state_match.group(1).strip()
-    
-    laser_state_match = re.search(r'Laser State:\s*([^\n\r]+)', output)
-    if laser_state_match:
-        result['laser_state'] = laser_state_match.group(1).strip()
-    
-    part_number_match = re.search(r'Part Number\s*:\s*([^\n\r]+)', output)
-    if part_number_match:
-        result['part_number'] = part_number_match.group(1).strip()
-    
-    return result
-
-def parse_lane_data(output: str) -> Optional[Dict[str, Dict[str, str]]]:
-    """
-    Parse les données des lanes si présentes dans le format tableau
-    Retourne None si pas de lanes trouvées
-    """
-    # Chercher le tableau des lanes
-    lane_section = re.search(
-        r'Lane\s+Laser Bias\s+TX Power\s+RX Power\s+Output Frequency\s*\n\s*-+.*?\n((?:\s*\d+.*?\n)*)', 
-        output, 
-        re.MULTILINE | re.DOTALL
-    )
-    
-    if not lane_section:
-        return None
-    
-    lanes_text = lane_section.group(1)
-    lanes_data = {}
-    
-    # Parser chaque ligne de lane
-    for line in lanes_text.split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-            
-        # Format: Lane_num   Laser_bias   TX_Power   RX_Power   Output_Freq
-        lane_match = re.match(r'(\d+)\s+[\d.]+\s*mA\s+([\d.-]+)\s*dBm\s+([\d.-]+)\s*dBm\s+.*', line)
-        if lane_match:
-            lane_num = lane_match.group(1)
-            tx_power = lane_match.group(2)
-            rx_power = lane_match.group(3)
-            
-            lanes_data[lane_num] = {
-                'tx': f"{tx_power} dBm",
-                'rx': f"{rx_power} dBm"
-            }
-    
-    return lanes_data if lanes_data else None
 
 def get_optical_power(final_host: str, port: str, intermediate_host: str) -> Dict[str, str]:
     """Version compatible pour un seul port (rétrocompatibilité)"""
