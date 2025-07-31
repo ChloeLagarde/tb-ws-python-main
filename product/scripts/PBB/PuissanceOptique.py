@@ -110,40 +110,87 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                 # Parsing des résultats
                 result = default_result.copy()
                 
-                # Expressions régulières pour extraire les données
-                rx_match = re.search(r'RX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
-                tx_match = re.search(r'Actual TX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
-                pid_match = re.search(r'PID\s*:\s*([^\n]+)', output)
-                optics_type_match = re.search(r'Optics type\s*:\s*([^\n]+)', output)
-                name_match = re.search(r'Name\s*:\s*([^\n]+)', output)
-                fec_match = re.search(r'FEC State:\s*([^\n]+)', output)
-                wavelength_match = re.search(r'Wavelength\s*=\s*([^\n]+)', output)
-                alarm_match = re.search(r'Detected Alarms:\s*([^\n]+)', output)
-                rx_threshold_match = re.search(r'Rx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
-                tx_threshold_match = re.search(r'Tx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
+                # === FORMAT 1: Tableau avec lanes (comme pbb-man72-01) ===
+                lane_match = re.search(r'Lane\s+Laser Bias\s+TX Power\s+RX Power.*?\n(.*?)(?=\n\s*Temperature|\n\s*$|\Z)', output, re.DOTALL)
+                if lane_match:
+                    lanes_data = lane_match.group(1)
+                    tx_powers = []
+                    rx_powers = []
+                    
+                    for line in lanes_data.strip().split('\n'):
+                        if re.match(r'\s*\d+\s+', line):  # Ligne commençant par un numéro de lane
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                # Format attendu: lane, bias, tx_power, rx_power
+                                lane_num = parts[0]
+                                tx_power = parts[2].replace('dBm', '').strip()
+                                rx_power = parts[3].replace('dBm', '').strip()
+                                
+                                try:
+                                    tx_powers.append(f"Lane {lane_num}: {tx_power} dBm")
+                                    rx_powers.append(f"Lane {lane_num}: {rx_power} dBm")
+                                except:
+                                    continue
+                    
+                    if tx_powers and rx_powers:
+                        result['tx'] = "[" + ", ".join(tx_powers) + "]"
+                        result['rx'] = "[" + ", ".join(rx_powers) + "]"
+                else:
+                    # === FORMAT 2: Lignes individuelles (comme pbb-th275-01) ===
+                    # RX Power
+                    rx_match = re.search(r'RX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
+                    if rx_match:
+                        result['rx'] = f"{rx_match.group(1)} dBm"
+                    
+                    # TX Power - essayer plusieurs formats
+                    tx_match = re.search(r'(?:Actual\s+)?TX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
+                    if tx_match:
+                        result['tx'] = f"{tx_match.group(1)} dBm"
 
-                # Extraction des valeurs
-                if rx_match:
-                    result['rx'] = rx_match.group(1).strip()
-                if tx_match:
-                    result['tx'] = tx_match.group(1).strip()
+                # === Autres informations communes aux deux formats ===
+                pid_match = re.search(r'PID\s*:\s*([^\n]+)', output)
                 if pid_match:
                     result['pid'] = pid_match.group(1).strip()
+                    
+                optics_type_match = re.search(r'Optics type\s*:\s*([^\n]+)', output)
                 if optics_type_match:
                     result['optics_type'] = optics_type_match.group(1).strip()
+                    
+                name_match = re.search(r'Name\s*:\s*([^\n]+)', output)
                 if name_match:
                     result['name'] = name_match.group(1).strip()
+                    
+                fec_match = re.search(r'FEC State:\s*([^\n]+)', output)
                 if fec_match:
                     result['fec_state'] = fec_match.group(1).strip()
+                    
+                wavelength_match = re.search(r'Wavelength\s*=\s*([^\n]+)', output)
                 if wavelength_match:
                     result['wavelength'] = wavelength_match.group(1).strip()
+                    
+                alarm_match = re.search(r'Detected Alarms:\s*([^\n]+)', output)
                 if alarm_match:
                     result['alarm_status'] = alarm_match.group(1).strip()
+                    
+                led_state_match = re.search(r'LED State:\s*([^\n]+)', output)
+                if led_state_match:
+                    result['led_state'] = led_state_match.group(1).strip()
+                    
+                laser_state_match = re.search(r'Laser State:\s*([^\n]+)', output)
+                if laser_state_match:
+                    result['laser_state'] = laser_state_match.group(1).strip()
+                    
+                part_number_match = re.search(r'Part Number\s*:\s*([^\n]+)', output)
+                if part_number_match:
+                    result['part_number'] = part_number_match.group(1).strip()
                 
-                # Extraction des seuils
+                # Thresholds
+                rx_threshold_match = re.search(r'Rx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
                 if rx_threshold_match:
                     result['rx_threshold_high'] = rx_threshold_match.group(1).strip()
                     result['rx_threshold_low'] = rx_threshold_match.group(2).strip()
+                    
+                tx_threshold_match = re.search(r'Tx Power Threshold\(dBm\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', output)
                 if tx_threshold_match:
                     result['tx_threshold_high'] = tx_threshold_match.group(1).strip()
                     result['tx_threshold_low'] = tx_threshold_match.group(2).strip()
