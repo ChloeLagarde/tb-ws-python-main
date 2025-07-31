@@ -388,7 +388,7 @@ class NetworkEquipment:
                 "index": idx
             }
             
-            if bundle_info["bundle"] != "N/A":
+            if bundle_info["bundle"] != "N/A" and bundle_info["status_bundle"].lower() in ["up", "active"]:
                 port_info.update({
                     "bundle": bundle_info["bundle"],
                     "status_bundle": bundle_info["status_bundle"],
