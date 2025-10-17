@@ -1,12 +1,10 @@
 import re
-import pexpect
-from typing import Dict, List, Optional
 import time
-from datetime import datetime
+from typing import Dict, List, Optional
+from scripts.SSH import ssh_pbb_cisco, close_ssh_pbb_cisco
 
 # Connexions SSH globales réutilisables
 ssh_connections = {}
-final_connections = {}
 
 def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host: str) -> Dict[str, Dict[str, str]]:
     """
@@ -35,50 +33,16 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
     }
     
     try:
-        intermediate_user = 'cag'
-        intermediate_password = 'SpaciumAevum043?'
-        final_user = 'provauto'
-        final_password = 'srv-pia64-l'
-
-        # Réutilisation de la connexion intermédiaire
-        if intermediate_host in ssh_connections and ssh_connections[intermediate_host]['session'].isalive():
-            session = ssh_connections[intermediate_host]['session']
-        else:
-            session = pexpect.spawn(f'ssh -o StrictHostKeyChecking=no {intermediate_user}@{intermediate_host}', timeout=30)
-            i = session.expect(['password:', pexpect.TIMEOUT], timeout=30)
-            if i == 1:
-                raise Exception(f"Timeout en attendant le mot de passe pour {intermediate_host}")
-            session.sendline(intermediate_password)
-            
-            prompt_patterns = [r'\$ ', r'# ', pexpect.TIMEOUT]
-            if session.expect(prompt_patterns, timeout=30) == 2:
-                raise Exception(f"Timeout en attendant le prompt sur {intermediate_host}")
-
-            ssh_connections[intermediate_host] = {
-                'session': session,
-                'prompt_pattern': session.match.group(0) if session.match else r'\$ '
-            }
-
-        # Connexion à l'équipement final (réutilisable)
+        # Utiliser la connexion centralisée du cache ou créer une nouvelle
         connection_key = f"{intermediate_host}_{final_host}"
         
-        if connection_key not in final_connections or not session.isalive():
-            final_host_command = f'ssh -o StrictHostKeyChecking=no {final_user}@{final_host}'
-            session.sendline(final_host_command)
-
-            session.expect(r'\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*', timeout=60)
-            session.send(' ')
-            
-            i = session.expect([r'Password:', r'password:', pexpect.TIMEOUT], timeout=60)
-            if i == 2:
-                raise Exception(f"Timeout en attendant le mot de passe pour {final_host}")
-            session.sendline(final_password)
-
-            prompt_patterns = [r'RP/0/RP0/CPU0:.*#', r'.*#', pexpect.TIMEOUT]
-            if session.expect(prompt_patterns, timeout=30) == 2:
-                raise Exception(f"Timeout en attendant le prompt Cisco sur {final_host}")
-                
-            final_connections[connection_key] = True
+        if connection_key in ssh_connections and ssh_connections[connection_key]['session'].isalive():
+            session = ssh_connections[connection_key]['session']
+        else:
+            # Créer une nouvelle connexion via SSH.py
+            conn_result = ssh_pbb_cisco(final_host, intermediate_host)
+            session = conn_result['session']
+            ssh_connections[connection_key] = {'session': session}
 
         # Traitement batch de tous les ports
         for i, port in enumerate(ports):
@@ -93,7 +57,7 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                 # Timeout réduit pour chaque commande
                 start_time = time.time()
                 while True:
-                    index = session.expect([prompt_pattern, '--More--', 'Press any key to continue', pexpect.TIMEOUT], timeout=10)
+                    index = session.expect([prompt_pattern, '--More--', 'Press any key to continue', 'pexpect.TIMEOUT'], timeout=10)
                     output += session.before.decode('utf-8', errors='replace')
                     
                     if index == 0:
@@ -121,7 +85,6 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                         if re.match(r'\s*\d+\s+', line):  # Ligne commençant par un numéro de lane
                             parts = line.split()
                             if len(parts) >= 4:
-                                # Format attendu: lane, bias, tx_power, rx_power
                                 lane_num = parts[0]
                                 tx_power = parts[2].replace('dBm', '').strip()
                                 rx_power = parts[3].replace('dBm', '').strip()
@@ -137,12 +100,10 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
                         result['rx'] = "[" + ", ".join(rx_powers) + "]"
                 else:
                     # === FORMAT 2: Lignes individuelles (comme pbb-th275-01) ===
-                    # RX Power
                     rx_match = re.search(r'RX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
                     if rx_match:
                         result['rx'] = f"{rx_match.group(1)} dBm"
                     
-                    # TX Power - essayer plusieurs formats
                     tx_match = re.search(r'(?:Actual\s+)?TX Power\s*=\s*(-?\d+\.\d+)\s*dBm', output)
                     if tx_match:
                         result['tx'] = f"{tx_match.group(1)} dBm"
@@ -232,6 +193,7 @@ def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host
     
     return formatted_results
 
+
 def get_optical_power(final_host: str, port: str, intermediate_host: str) -> Dict[str, str]:
     """Version compatible pour un seul port (rétrocompatibilité)"""
     results = get_optical_power_batch(final_host, [port], intermediate_host)
@@ -275,6 +237,7 @@ def get_optical_power(final_host: str, port: str, intermediate_host: str) -> Dic
             'laser_state': 'N/A'
         }
 
+
 def get_bundle_info(final_host: str, intermediate_host: str) -> Dict[str, Dict]:
     """
     Récupère les informations des bundles via la commande 'show bundle'.
@@ -283,50 +246,16 @@ def get_bundle_info(final_host: str, intermediate_host: str) -> Dict[str, Dict]:
     results = {}
     
     try:
-        intermediate_user = 'cag'
-        intermediate_password = 'SpaciumAevum043?'
-        final_user = 'provauto'
-        final_password = 'srv-pia64-l'
-
-        # Réutilisation de la connexion intermédiaire
-        if intermediate_host in ssh_connections and ssh_connections[intermediate_host]['session'].isalive():
-            session = ssh_connections[intermediate_host]['session']
-        else:
-            session = pexpect.spawn(f'ssh -o StrictHostKeyChecking=no {intermediate_user}@{intermediate_host}', timeout=30)
-            i = session.expect(['password:', pexpect.TIMEOUT], timeout=30)
-            if i == 1:
-                raise Exception(f"Timeout en attendant le mot de passe pour {intermediate_host}")
-            session.sendline(intermediate_password)
-            
-            prompt_patterns = [r'\$ ', r'# ', pexpect.TIMEOUT]
-            if session.expect(prompt_patterns, timeout=30) == 2:
-                raise Exception(f"Timeout en attendant le prompt sur {intermediate_host}")
-
-            ssh_connections[intermediate_host] = {
-                'session': session,
-                'prompt_pattern': session.match.group(0) if session.match else r'\$ '
-            }
-
-        # Connexion à l'équipement final
+        # Utiliser la connexion centralisée
         connection_key = f"{intermediate_host}_{final_host}"
         
-        if connection_key not in final_connections or not session.isalive():
-            final_host_command = f'ssh -o StrictHostKeyChecking=no {final_user}@{final_host}'
-            session.sendline(final_host_command)
-
-            session.expect(r'\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*', timeout=60)
-            session.send(' ')
-            
-            i = session.expect([r'Password:', r'password:', pexpect.TIMEOUT], timeout=60)
-            if i == 2:
-                raise Exception(f"Timeout en attendant le mot de passe pour {final_host}")
-            session.sendline(final_password)
-
-            prompt_patterns = [r'RP/0/RP0/CPU0:.*#', r'.*#', pexpect.TIMEOUT]
-            if session.expect(prompt_patterns, timeout=30) == 2:
-                raise Exception(f"Timeout en attendant le prompt Cisco sur {final_host}")
-                
-            final_connections[connection_key] = True
+        if connection_key in ssh_connections and ssh_connections[connection_key]['session'].isalive():
+            session = ssh_connections[connection_key]['session']
+        else:
+            # Créer une nouvelle connexion via SSH.py
+            conn_result = ssh_pbb_cisco(final_host, intermediate_host)
+            session = conn_result['session']
+            ssh_connections[connection_key] = {'session': session}
 
         # Exécution de la commande show bundle
         bundle_command = 'show bundle'
@@ -338,7 +267,7 @@ def get_bundle_info(final_host: str, intermediate_host: str) -> Dict[str, Dict]:
         # Collecte de la sortie complète
         start_time = time.time()
         while True:
-            index = session.expect([prompt_pattern, '--More--', 'Press any key to continue', pexpect.TIMEOUT], timeout=15)
+            index = session.expect([prompt_pattern, '--More--', 'Press any key to continue', 'pexpect.TIMEOUT'], timeout=15)
             output += session.before.decode('utf-8', errors='replace')
             
             if index == 0:
@@ -360,10 +289,9 @@ def get_bundle_info(final_host: str, intermediate_host: str) -> Dict[str, Dict]:
     
     return results
 
+
 def parse_bundle_output(output: str) -> Dict[str, Dict]:
-    """
-    Parse la sortie de la commande 'show bundle' et extrait les informations.
-    """
+    """Parse la sortie de la commande 'show bundle' et extrait les informations."""
     results = {}
     
     # Division de la sortie par bundles
@@ -380,10 +308,9 @@ def parse_bundle_output(output: str) -> Dict[str, Dict]:
     
     return results
 
+
 def parse_single_bundle(block: str) -> Optional[Dict]:
-    """
-    Parse les informations d'un seul bundle.
-    """
+    """Parse les informations d'un seul bundle."""
     lines = block.strip().split('\n')
     if not lines:
         return None
@@ -414,40 +341,31 @@ def parse_single_bundle(block: str) -> Optional[Dict]:
     for line in lines:
         line = line.strip()
         
-        # Status
         status_match = re.search(r'Status:\s+(.+)', line)
         if status_match:
             bundle_data['status'] = status_match.group(1).strip()
         
-        # Local links
         links_match = re.search(r'Local links <active/standby/configured>:\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)', line)
         if links_match:
             bundle_data['local_links_active'] = links_match.group(1)
             bundle_data['local_links_standby'] = links_match.group(2)
             bundle_data['local_links_configured'] = links_match.group(3)
         
-        # Local bandwidth
         bandwidth_match = re.search(r'Local bandwidth <effective/available>:\s+(\d+)\s*\((\d+)\)\s*kbps', line)
         if bandwidth_match:
             bundle_data['local_bandwidth_effective'] = f"{bandwidth_match.group(1)} kbps"
             bundle_data['local_bandwidth_available'] = f"{bandwidth_match.group(2)} kbps"
         
-        # MAC address
         mac_match = re.search(r'MAC address \(source\):\s+([0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})', line)
         if mac_match:
             bundle_data['mac_address'] = mac_match.group(1)
         
-        # LACP status
         if 'LACP:' in line:
             lacp_match = re.search(r'LACP:\s+(.+)', line)
             if lacp_match:
                 bundle_data['lacp_status'] = lacp_match.group(1).strip()
         
-        # BFD IPv4 state
-        if 'IPv4 BFD:' in line:
-            # Chercher la ligne "State:" qui suit
-            continue
-        if line.startswith('State:') and 'bfd_ipv4_state' in bundle_data and bundle_data['bfd_ipv4_state'] == 'N/A':
+        if line.startswith('State:') and bundle_data['bfd_ipv4_state'] == 'N/A':
             state_match = re.search(r'State:\s+(.+)', line)
             if state_match:
                 bundle_data['bfd_ipv4_state'] = state_match.group(1).strip()
@@ -457,35 +375,28 @@ def parse_single_bundle(block: str) -> Optional[Dict]:
     
     return bundle_data
 
+
 def parse_bundle_ports(block: str) -> List[Dict[str, str]]:
-    """
-    Parse les informations des ports d'un bundle.
-    """
+    """Parse les informations des ports d'un bundle."""
     ports = []
     lines = block.split('\n')
     
-    # Recherche de la section des ports
     port_section_started = False
     
     for i, line in enumerate(lines):
         line = line.strip()
         
-        # Début de la section ports (après les tirets de séparation)
         if '--------------------' in line and 'Port' in lines[i-1] if i > 0 else False:
             port_section_started = True
             continue
         
-        # Si on est dans la section ports
         if port_section_started:
-            # Fin de la section (ligne vide ou nouveau bundle)
             if not line or line.startswith('Bundle-Ether') or 'IPv4 BFD:' in line:
                 break
             
-            # Skip les lignes de détail des liens ("Link is Active", etc.)
             if line.startswith('Link is') or line.startswith('LACP') or '--' in line:
                 continue
             
-            # Parse d'une ligne de port
             port_match = re.match(r'(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', line)
             if port_match:
                 port_info = {
@@ -499,10 +410,9 @@ def parse_bundle_ports(block: str) -> List[Dict[str, str]]:
     
     return ports
 
+
 def format_bundle_summary(bundle_data: Dict[str, Dict]) -> str:
-    """
-    Formate un résumé des informations des bundles.
-    """
+    """Formate un résumé des informations des bundles."""
     if not bundle_data:
         return "Aucune information de bundle trouvée."
     
@@ -527,23 +437,28 @@ def format_bundle_summary(bundle_data: Dict[str, Dict]) -> str:
     
     return summary
 
+
 def close_connection(hostname: str) -> None:
     """Ferme une connexion SSH spécifique"""
-    if hostname in ssh_connections and ssh_connections[hostname]['session'].isalive():
-        try:
-            session = ssh_connections[hostname]['session']
-            session.sendline('exit')
-            session.close()
-            del ssh_connections[hostname]
-        except Exception as e:
-            pass
+    # Chercher dans le cache de connexions
+    keys_to_remove = [key for key in ssh_connections.keys() if hostname in key]
+    
+    for key in keys_to_remove:
+        if ssh_connections[key]['session'].isalive():
+            try:
+                close_ssh_pbb_cisco(ssh_connections[key]['session'])
+                del ssh_connections[key]
+            except Exception:
+                pass
+
 
 def close_all_connections() -> None:
     """Ferme toutes les connexions SSH"""
-    hosts = list(ssh_connections.keys())
-    for hostname in hosts:
-        close_connection(hostname)
+    keys = list(ssh_connections.keys())
+    for key in keys:
+        try:
+            close_ssh_pbb_cisco(ssh_connections[key]['session'])
+        except Exception:
+            pass
     
-    # Réinitialiser aussi les connexions finales
-    global final_connections
-    final_connections = {}
+    ssh_connections.clear()
