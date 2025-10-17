@@ -46,7 +46,8 @@ equipment_patterns = [
     {"pattern": r'Ciena', "type": "CIENA", "model": "Unknown"},
     {"pattern": r'Ekinops 360', "type": "EKINOPS", "model": "Unknown"},
     {"pattern": r'Nokia 1830', "type": "NOKIA PSS", "model": "Unknown"},
-    {"pattern": r'Cisco IOS XR Software (8000)', "type": "CISCO", "model": "Cisco 8201-32FH" }
+    {"pattern": r'abr.*Cisco IOS XR Software \(8000\)', "type": "CISCO", "model": "Cisco 8201-24H8FH"},
+    {"pattern": r'pbb.*Cisco IOS XR Software \(8000\)', "type": "CISCO", "model": "Cisco 8201-32FH"}
 ]
 def version_alcatel_telco_one_access(host):
     output = snmp_request(host, '1.3.6.1.2.1.1.1.0')
