@@ -210,12 +210,18 @@ class NetworkEquipment:
             "state": "N/A"
         }
         
-        port_normalized = port_number.replace("Hu", "").replace("0/0/0/", "")
+        # Normaliser le port en retirant uniquement les préfixes mais gardant le format complet
+        port_normalized = port_number.replace("Hu", "").replace("FH", "").replace("HundredGigE", "")
+        if not port_normalized.startswith("0/0/0/"):
+            port_normalized = f"0/0/0/{port_normalized}"
         
         for bundle_name, data in bundle_data.items():
             for port in data.get('ports', []):
                 port_name = port.get('port', '')
-                port_name_normalized = port_name.replace("Hu", "").replace("0/0/0/", "")
+                # Appliquer la même normalisation
+                port_name_normalized = port_name.replace("Hu", "").replace("FH", "").replace("HundredGigE", "")
+                if not port_name_normalized.startswith("0/0/0/"):
+                    port_name_normalized = f"0/0/0/{port_name_normalized}"
                 
                 if port_normalized == port_name_normalized:
                     bundle_info = {
@@ -317,8 +323,18 @@ class NetworkEquipment:
             }
             
             for port in data.get('ports', []):
+                # Nettoyer uniquement le préfixe Hu/FH mais garder le chemin complet
+                port_name = port.get('port', 'N/A')
+                
+                # Retirer uniquement les préfixes d'interface (Hu, FH, etc.) mais garder 0/0/0/X
+                port_clean = port_name.replace('Hu', '').replace('FH', '').replace('HundredGigE', '')
+                
+                # Si le port ne commence pas par 0/0/0/, l'ajouter
+                if port_clean and not port_clean.startswith('0/0/0/'):
+                    port_clean = f"0/0/0/{port_clean}"
+                
                 lag_info["ports"].append({
-                    "port": port.get('port', 'N/A').replace('Hu', '').replace('0/0/0/', ''),
+                    "port": port_clean,
                     "state": port.get('state', 'N/A')
                 })
             
