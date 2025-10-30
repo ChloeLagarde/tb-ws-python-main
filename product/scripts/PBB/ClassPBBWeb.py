@@ -167,17 +167,26 @@ class NetworkEquipment:
             return type_value, ""  
 
     def _find_equipment_model(self, snmp_type_output: str) -> str:
-        if "Cisco IOS XR Software (8000)" in snmp_type_output:
-            for pattern_info in equipment_patterns:
-                if pattern_info["pattern"] == r'Cisco IOS XR Software \(8000\)':
-                    return pattern_info["model"]
+        """Détermine le modèle d'équipement basé sur la sortie SNMP et le hostname"""
         
+        # Cas spécial pour Cisco 8000 : différencier selon le hostname
+        if "Cisco IOS XR Software (8000)" in snmp_type_output:
+            hostname_lower = self.hostname.lower()
+            # Si le hostname commence par 'abr', c'est un 24H8FH
+            if hostname_lower.startswith('abr'):
+                return "Cisco 8201-24H8FH"
+            # Sinon (pbb, lsr, ou autre), c'est un 32FH
+            else:
+                return "Cisco 8201-32FH"
+        
+        # Recherche du modèle dans equipment_patterns
         for pattern_info in equipment_patterns:
             match = re.search(pattern_info["pattern"], snmp_type_output)
             if match:
                 if pattern_info.get("model") and pattern_info["model"] != "Unknown" and pattern_info["model"] is not None:
                     return pattern_info["model"]
         
+        # Si pas de modèle, retourner le type
         for pattern_info in equipment_patterns:
             match = re.search(pattern_info["pattern"], snmp_type_output)
             if match and pattern_info.get("type"):
@@ -324,12 +333,10 @@ class NetworkEquipment:
         if type_info and len(type_info) > 0:
             type_str, version_str = self._parse_type_info(type_info[0]['value'])
 
-            if "Cisco IOS XR Software (8000)" in type_str:
-                info["equipment_info"]["type"] = "Cisco 8201-32FH"
-            else:
-                raw_snmp_output = type_info[0]['raw_output']
-                model = self._find_equipment_model(raw_snmp_output)
-                info["equipment_info"]["type"] = model if model != "Unknown" else type_str
+            # Utiliser _find_equipment_model pour tous les équipements
+            raw_snmp_output = type_info[0]['raw_output']
+            model = self._find_equipment_model(raw_snmp_output)
+            info["equipment_info"]["type"] = model if model != "Unknown" else type_str
             
             info["equipment_info"]["Version"] = version_str
 
