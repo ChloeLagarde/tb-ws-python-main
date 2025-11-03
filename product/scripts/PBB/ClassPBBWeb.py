@@ -202,6 +202,31 @@ class NetworkEquipment:
         except Exception as e:
             return {}
 
+    def _normalize_port_name(self, port_name: str) -> str:
+        """Normalise un nom de port en retirant les préfixes et en ajoutant 0/0/0/ si nécessaire"""
+        # Liste exhaustive des préfixes d'interface à retirer
+        prefixes_to_remove = [
+            'HundredGigE', 'Hu', 'FH',
+            'TenGigE', 'Te',
+            'GigabitEthernet', 'Gi',
+            'FourHundredGigE', 'Fo',
+            'FastEthernet', 'Fa'
+        ]
+        
+        port_clean = port_name
+        
+        # Retirer le premier préfixe trouvé
+        for prefix in prefixes_to_remove:
+            if port_clean.startswith(prefix):
+                port_clean = port_clean[len(prefix):]
+                break
+        
+        # Si le port ne commence pas par 0/0/0/, l'ajouter
+        if port_clean and not port_clean.startswith('0/0/0/'):
+            port_clean = f"0/0/0/{port_clean}"
+        
+        return port_clean
+
     def _get_port_bundle_info(self, port_number: str, bundle_data: Dict[str, Dict]) -> Dict[str, str]:
         """Détermine les informations de bundle pour un port donné"""
         bundle_info = {
@@ -210,18 +235,14 @@ class NetworkEquipment:
             "state": "N/A"
         }
         
-        # Normaliser le port en retirant uniquement les préfixes mais gardant le format complet
-        port_normalized = port_number.replace("Hu", "").replace("FH", "").replace("HundredGigE", "")
-        if not port_normalized.startswith("0/0/0/"):
-            port_normalized = f"0/0/0/{port_normalized}"
+        # Normaliser le port
+        port_normalized = self._normalize_port_name(port_number)
         
         for bundle_name, data in bundle_data.items():
             for port in data.get('ports', []):
                 port_name = port.get('port', '')
                 # Appliquer la même normalisation
-                port_name_normalized = port_name.replace("Hu", "").replace("FH", "").replace("HundredGigE", "")
-                if not port_name_normalized.startswith("0/0/0/"):
-                    port_name_normalized = f"0/0/0/{port_name_normalized}"
+                port_name_normalized = self._normalize_port_name(port_name)
                 
                 if port_normalized == port_name_normalized:
                     bundle_info = {
@@ -323,15 +344,9 @@ class NetworkEquipment:
             }
             
             for port in data.get('ports', []):
-                # Nettoyer uniquement le préfixe Hu/FH mais garder le chemin complet
+                # Normaliser le nom du port en utilisant la méthode dédiée
                 port_name = port.get('port', 'N/A')
-                
-                # Retirer uniquement les préfixes d'interface (Hu, FH, etc.) mais garder 0/0/0/X
-                port_clean = port_name.replace('Hu', '').replace('FH', '').replace('HundredGigE', '')
-                
-                # Si le port ne commence pas par 0/0/0/, l'ajouter
-                if port_clean and not port_clean.startswith('0/0/0/'):
-                    port_clean = f"0/0/0/{port_clean}"
+                port_clean = self._normalize_port_name(port_name)
                 
                 lag_info["ports"].append({
                     "port": port_clean,
