@@ -45,7 +45,7 @@ class NetworkEquipment:
         self._snmp_cache = {}
 
     def _snmp_walk(self, oid: str) -> Optional[str]:
-        """SNMP walk avec mise en cache (fonction de SnmpRequests)"""
+        """SNMP walk avec mise en cache"""
         if oid in self._snmp_cache:
             return self._snmp_cache[oid]
             
