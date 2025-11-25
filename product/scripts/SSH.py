@@ -104,7 +104,7 @@ def ssh_pbb_cisco(final_host, intermediate_host='vma-prddck-104.pau', intermedia
     Returns:
         dict: {'session': pexpect_session, 'results': {cmd: output}} ou None en cas d'erreur
     """
-    intermediate_password = 'AevumSpacium043?'
+    intermediate_password = 'VivumSpacium043?'
     final_user = 'provauto'
     final_password = 'srv-pia64-l'
     
