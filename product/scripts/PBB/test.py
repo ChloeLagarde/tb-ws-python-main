@@ -11,9 +11,13 @@ import subprocess
 import concurrent.futures
 import time
 import requests
+import urllib3
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Union
+
+# Désactiver les warnings SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ===== FONCTIONS COPIÉES POUR ÉVITER LES IMPORTS =====
 
@@ -136,6 +140,10 @@ class NetworkEquipment:
         self.slot = slot  
         self.version = version
         
+        # Initialiser une session requests avec configuration similaire à Service.py
+        self.session = requests.Session()
+        self.session.verify = False  # Désactiver la vérification SSL
+        
         print(f"🔍 Recherche du DNS pour {hostname}...")
         self.dns_complet = find_dns(hostname)
         
@@ -172,7 +180,11 @@ class NetworkEquipment:
                 result = output.decode('utf-8') if isinstance(output, bytes) else output
                 match = re.search(r'STRING:\s*"?([^"\n]+)"?', result)
                 if match:
-                    self._fqdn = match.group(1).strip()
+                    fqdn_raw = match.group(1).strip()
+                    # Nettoyer le FQDN pour garder seulement le hostname complet
+                    # Exemple: "pbb-man72-01.bcb.axione.fr" ou parfois avec des espaces/caractères parasites
+                    fqdn_clean = fqdn_raw.split()[0] if ' ' in fqdn_raw else fqdn_raw
+                    self._fqdn = fqdn_clean
                     print(f"✅ FQDN récupéré via SNMP: {self._fqdn}")
                     return self._fqdn
                 else:
@@ -182,46 +194,156 @@ class NetworkEquipment:
         except Exception as e:
             print(f"❌ Erreur lors de la récupération du FQDN via SNMP: {e}")
         
+        # Si SNMP échoue, utiliser le DNS complet trouvé
+        if self.dns_complet:
+            print(f"ℹ️  Utilisation du DNS complet comme FQDN: {self.dns_complet}")
+            self._fqdn = self.dns_complet
+            return self._fqdn
+        
         return None
 
     def _query_prometheus_unified(self, hostname: str, max_retries: int = 20) -> Optional[List[Dict]]:
         """Exécute une seule requête Prometheus avec système de retry"""
-        query = f'ifMetrics_ifAdminStatus{{hostname="{hostname}", ifName=~".*0/0/0.*"}}'
-        params = {'query': query}
+        # Construction de la requête simplifiée (sans filtre ifName)
+        query = f'ifMetrics_ifAdminStatus{{hostname=%22{hostname}%22}}'
         
-        # Construire l'URL complète pour affichage
-        full_url = f"{self.PROMETHEUS_BASE_URL}?query={requests.utils.quote(query)}"
-        print(f"🔍 URL Prometheus générée:")
-        print(f"   {full_url}")
+        # Construire l'URL complète
+        full_url = f"{self.PROMETHEUS_BASE_URL}?query={query}"
+        
+        # Headers similaires à Service.py
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+        
+        # Désactiver les proxies pour cette requête
+        proxies = {
+            'http': None,
+            'https': None
+        }
+        
+        print(f"🔍 Requête Prometheus:")
+        print(f"   Hostname utilisé: {hostname}")
+        print(f"   Query: {query}")
+        print(f"   URL complète ({len(full_url)} caractères):")
+        print(f"   {repr(full_url)}")
+        print(f"   Headers: {headers}")
+        print(f"   Proxies désactivés: {proxies}")
         print(f"🔄 Tentatives de récupération (max: {max_retries})...")
+        print("=" * 60)
         
         for attempt in range(1, max_retries + 1):
+            print(f"\n⏱️  TENTATIVE {attempt}/{max_retries}")
+            print("-" * 60)
+            
             try:
-                response = requests.get(self.PROMETHEUS_BASE_URL, params=params, timeout=10)
+                print(f"📤 Envoi de la requête GET avec session (sans proxy)...")
+                print(f"   URL: {full_url[:120]}{'...' if len(full_url) > 120 else ''}")
+                
+                # Mesurer le temps de la requête
+                request_start = time.time()
+                
+                # Utiliser self.session avec proxies désactivés
+                response = self.session.get(full_url, headers=headers, proxies=proxies, timeout=30)
+                
+                request_time = time.time() - request_start
+                
+                print(f"📥 Réponse reçue en {request_time:.2f}s")
+                print(f"   Status HTTP: {response.status_code}")
+                print(f"   Taille réponse: {len(response.content)} bytes")
+                print(f"   URL effective: {response.url}")
+                
+                # Vérifier l'URL effective
+                if response.url != full_url:
+                    print(f"⚠️  URL redirigée vers: {response.url}")
+                
                 response.raise_for_status()
                 
+                print(f"🔍 Parsing JSON...")
                 data = response.json()
                 
-                if data.get('status') == 'success' and data.get('data', {}).get('result'):
-                    result_count = len(data['data']['result'])
-                    print(f"✅ Tentative {attempt}/{max_retries}: {result_count} résultats récupérés")
-                    return data['data']['result']
+                print(f"📊 Contenu JSON:")
+                print(f"   Status: {data.get('status', 'N/A')}")
+                
+                if 'data' in data:
+                    print(f"   Data présent: Oui")
+                    if 'result' in data.get('data', {}):
+                        result_count = len(data['data']['result'])
+                        print(f"   Nombre de résultats: {result_count}")
+                        
+                        if result_count > 0:
+                            print(f"   Premier résultat (aperçu):")
+                            first_result = data['data']['result'][0]
+                            print(f"      Metric: {first_result.get('metric', {}).get('ifName', 'N/A')}")
+                            print(f"      Value: {first_result.get('value', ['N/A'])[1] if len(first_result.get('value', [])) > 1 else 'N/A'}")
+                            
+                            print(f"✅ SUCCÈS: {result_count} résultats récupérés")
+                            return data['data']['result']
+                        else:
+                            print(f"⚠️  Résultat vide (0 interfaces trouvées)")
+                    else:
+                        print(f"   Result présent: Non")
+                        print(f"   Contenu data: {data.get('data', {})}")
                 else:
-                    print(f"⏳ Tentative {attempt}/{max_retries}: Aucun résultat (attente 2s...)")
-                    time.sleep(2)
+                    print(f"   Data présent: Non")
+                    print(f"   Contenu complet: {data}")
+                
+                print(f"⏳ Aucune donnée exploitable, attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
                     
             except requests.exceptions.Timeout as e:
-                print(f"⏱️  Tentative {attempt}/{max_retries}: Timeout (attente 2s...)")
+                print(f"❌ TIMEOUT après 30s")
+                print(f"   Erreur: {str(e)}")
+                print(f"   Type: {type(e).__name__}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
                 time.sleep(2)
+                
+            except requests.exceptions.HTTPError as e:
+                print(f"❌ ERREUR HTTP")
+                print(f"   Status code: {response.status_code}")
+                print(f"   Raison: {response.reason}")
+                print(f"   Erreur: {str(e)}")
+                try:
+                    error_data = response.json()
+                    print(f"   Réponse JSON erreur: {error_data}")
+                except:
+                    print(f"   Réponse texte erreur: {response.text[:200]}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                
             except requests.exceptions.RequestException as e:
-                print(f"❌ Tentative {attempt}/{max_retries}: Erreur - {e}")
+                print(f"❌ ERREUR REQUÊTE")
+                print(f"   Type: {type(e).__name__}")
+                print(f"   Erreur: {str(e)}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                
+            except json.JSONDecodeError as e:
+                print(f"❌ ERREUR PARSING JSON")
+                print(f"   Erreur: {str(e)}")
+                print(f"   Réponse brute (100 premiers caractères): {response.text[:100]}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                
+            except Exception as e:
+                print(f"❌ ERREUR INATTENDUE")
+                print(f"   Type: {type(e).__name__}")
+                print(f"   Erreur: {str(e)}")
+                import traceback
+                print(f"   Traceback: {traceback.format_exc()[:300]}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
                 time.sleep(2)
         
-        print(f"❌ Échec après {max_retries} tentatives - Basculement vers SNMP")
+        print("\n" + "=" * 60)
+        print(f"❌ ÉCHEC DÉFINITIF après {max_retries} tentatives")
+        print(f"   Basculement vers SNMP...")
+        print("=" * 60)
         return None
 
     def _extract_bandwidth_from_ifname(self, ifname: str) -> str:
         """Extrait le débit depuis le nom de l'interface"""
+        # Cisco/PBB
         if "FourHundredGigE" in ifname or ifname.startswith("Fo"):
             return "400G"
         elif "HundredGigE" in ifname or ifname.startswith("Hu"):
@@ -230,10 +352,55 @@ class NetworkEquipment:
             return "10G"
         elif "GigabitEthernet" in ifname or ifname.startswith("Gi"):
             return "1G"
+        elif "FastEthernet" in ifname or ifname.startswith("Fa"):
+            return "100M"
+        
+        # Nokia
+        elif ifname.startswith("1/1/c") or ifname.startswith("1/1/x"):
+            # Ports Nokia haute vitesse (ex: 1/1/c1/1)
+            if "/c" in ifname:
+                return "100G"
+            elif "/x" in ifname:
+                return "10G"
+        
+        # Huawei
+        elif "XGigabitEthernet" in ifname or "XGE" in ifname:
+            return "10G"
+        elif "GE" in ifname and not "XGE" in ifname:
+            return "1G"
+        elif "40GE" in ifname:
+            return "40G"
+        elif "100GE" in ifname:
+            return "100G"
+        
+        # Juniper
+        elif "xe-" in ifname:
+            return "10G"
+        elif "et-" in ifname:
+            return "40G" if "40g" in ifname.lower() else "100G"
+        elif "ge-" in ifname:
+            return "1G"
+        
+        # Patterns génériques basés sur des nombres
+        elif "10g" in ifname.lower() or "10-gig" in ifname.lower():
+            return "10G"
+        elif "100g" in ifname.lower() or "100-gig" in ifname.lower():
+            return "100G"
+        elif "40g" in ifname.lower() or "40-gig" in ifname.lower():
+            return "40G"
+        elif "1g" in ifname.lower() or "1-gig" in ifname.lower():
+            return "1G"
+        
         return "Unknown"
 
-    def _normalize_port_name(self, port_name: str) -> str:
-        """Normalise un nom de port en retirant les préfixes"""
+    def _normalize_port_name(self, port_name: str, vendor: str = "Cisco") -> str:
+        """Normalise un nom de port en fonction du vendor"""
+        
+        # Pour les équipements non-Cisco, retourner le port tel quel
+        if vendor not in ["Cisco", "Unknown"]:
+            return port_name
+        
+        # Normalisation Cisco uniquement
         prefixes_to_remove = [
             'HundredGigE', 'Hu', 'FH',
             'TenGigE', 'Te',
@@ -249,6 +416,7 @@ class NetworkEquipment:
                 port_clean = port_clean[len(prefix):]
                 break
         
+        # Ajouter 0/0/0/ uniquement si nécessaire pour Cisco
         if port_clean and not port_clean.startswith('0/0/0/'):
             port_clean = f"0/0/0/{port_clean}"
         
@@ -286,43 +454,79 @@ class NetworkEquipment:
         ports_up = []
         ports_info_temp = []
         
+        print(f"📊 Analyse de {len(prometheus_results)} résultats Prometheus...")
+        
+        filtered_stats = {
+            'total': len(prometheus_results),
+            'down': 0,
+            'optics': 0,
+            'pbb_filter': 0,
+            'target_filter': 0,
+            'bandwidth_unknown': 0,
+            'accepted': 0
+        }
+        
         for result in prometheus_results:
             metric = result.get('metric', {})
             value_array = result.get('value', [])
             
             # Récupération des données
             ifname = metric.get('ifName', '')
-            ifalias = metric.get('ifAlias', '')
+            ifalias = metric.get('ifAlias', '').strip('"')  # Retirer les guillemets pour Huawei/Nokia
             ifphysaddr = metric.get('ifPhysAddress', '')
             model = metric.get('model', 'Unknown')
+            vendor = metric.get('vendor', 'Unknown')
+            category = metric.get('category', 'Unknown')
             admin_status = value_array[1] if len(value_array) > 1 else '2'
             
-            # Filtres
-            # 1. Si le port est down (2), on skip
+            # Debug pour le premier port
+            if filtered_stats['total'] == len(prometheus_results):
+                print(f"\n🔍 Exemple de port analysé:")
+                print(f"   ifName: {ifname}")
+                print(f"   ifAlias: {ifalias}")
+                print(f"   vendor: {vendor}")
+                print(f"   category: {category}")
+                print(f"   admin_status: {admin_status}")
+            
+            # Filtre 1: Si le port est down (2), on skip
             if admin_status == '2':
+                filtered_stats['down'] += 1
                 continue
             
-            # 2. Si c'est un Optics dans la description, on skip
+            # Filtre 2: Si c'est un Optics dans la description, on skip
             if 'optics' in ifalias.lower():
+                filtered_stats['optics'] += 1
                 continue
             
-            # Normalisation du port
-            port_number = self._normalize_port_name(ifname)
+            # Filtre 3: Pour les équipements PBB (Cisco), vérifier si c'est bien une interface 0/0/0
+            # Pour les autres, pas de filtre spécifique sur le format du port
+            if category == "PBB" and '0/0/0' not in ifname:
+                filtered_stats['pbb_filter'] += 1
+                continue
+            
+            # Normalisation du port en fonction du vendor
+            port_number = self._normalize_port_name(ifname, vendor)
             
             # Filtrage par port cible si spécifié
             if target_port:
                 if self.slot and port_number != target_port:
+                    filtered_stats['target_filter'] += 1
                     continue
                 elif not self.slot and not port_number.startswith(target_port):
+                    filtered_stats['target_filter'] += 1
                     continue
             
             # Détermination du débit
             bandwidth = self._extract_bandwidth_from_ifname(ifname)
             
+            # Si bandwidth Unknown, afficher un warning mais accepter quand même le port
             if bandwidth == "Unknown":
-                continue
+                print(f"⚠️  Bandwidth inconnu pour: {ifname} (vendor: {vendor})")
+                # Ne pas skip, juste mettre "Unknown"
+                # filtered_stats['bandwidth_unknown'] += 1
+                # continue
             
-            # Informations bundle
+            # Informations bundle (principalement pour Cisco/PBB)
             bundle_info = self._get_port_bundle_info(port_number, bundle_data)
             
             # Construction de la description avec le débit
@@ -335,6 +539,8 @@ class NetworkEquipment:
                 "port": port_number,
                 "description": description,
                 "model": model,
+                "vendor": vendor,
+                "category": category,
                 "alias": ifalias,
                 "status": status,
                 "admin_status": status,
@@ -342,6 +548,7 @@ class NetworkEquipment:
                 "bandwidth": bandwidth
             }
             
+            # Ajouter les infos bundle uniquement si disponibles
             if bundle_info["bundle"] != "N/A" and bundle_info["status_bundle"].lower() in ["up", "active"]:
                 port_info.update({
                     "bundle": bundle_info["bundle"],
@@ -351,6 +558,17 @@ class NetworkEquipment:
             
             ports_info_temp.append(port_info)
             ports_up.append(port_number)
+            filtered_stats['accepted'] += 1
+        
+        # Afficher les statistiques de filtrage
+        print(f"\n📊 Statistiques de filtrage:")
+        print(f"   Total interfaces: {filtered_stats['total']}")
+        print(f"   ❌ Down (status=2): {filtered_stats['down']}")
+        print(f"   ❌ Optics: {filtered_stats['optics']}")
+        print(f"   ❌ PBB sans 0/0/0: {filtered_stats['pbb_filter']}")
+        print(f"   ❌ Filtrage port cible: {filtered_stats['target_filter']}")
+        print(f"   ⚠️  Bandwidth inconnu: {filtered_stats['bandwidth_unknown']}")
+        print(f"   ✅ Acceptés: {filtered_stats['accepted']}")
         
         return ports_info_temp, ports_up
 
@@ -633,11 +851,19 @@ class NetworkEquipment:
         print("\n📍 ÉTAPE 6: Assemblage des données finales")
         print("-" * 60)
         
-        # Récupération du modèle depuis le premier port (ils ont tous le même)
+        # Récupération du modèle et vendor depuis le premier port (ils ont tous le même)
         if ports_info_temp:
             equipment_model = ports_info_temp[0].get('model', 'Unknown')
+            equipment_vendor = ports_info_temp[0].get('vendor', 'Unknown')
+            equipment_category = ports_info_temp[0].get('category', 'Unknown')
+            
             info["equipment_info"]["type"] = equipment_model
+            info["equipment_info"]["vendor"] = equipment_vendor
+            info["equipment_info"]["category"] = equipment_category
+            
             print(f"✅ Modèle d'équipement: {equipment_model}")
+            print(f"✅ Vendor: {equipment_vendor}")
+            print(f"✅ Catégorie: {equipment_category}")
         
         for port_info in ports_info_temp:
             port_number = port_info["port"]
@@ -703,6 +929,7 @@ if __name__ == "__main__":
         print("❌ Erreur: Nom d'équipement requis")
         exit(1)
     
+    hostname_override = input("📝 Hostname FQDN (optionnel, laissez vide pour auto-détection): ").strip()
     port_filter = input("📝 Port spécifique (optionnel, ex: 0/0/0/1): ").strip()
     slot_filter = input("📝 Slot spécifique (optionnel): ").strip()
     
@@ -716,6 +943,11 @@ if __name__ == "__main__":
             ip=port_filter if port_filter else None,
             slot=slot_filter if slot_filter else None
         )
+        
+        # Si l'utilisateur a fourni un hostname, l'utiliser directement
+        if hostname_override:
+            print(f"ℹ️  Utilisation du hostname fourni: {hostname_override}")
+            network_equipment._fqdn = hostname_override
         
         if port_filter or slot_filter:
             result = {

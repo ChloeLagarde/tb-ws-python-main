@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ClassPBBWeb.py - Version standalone
-Inclut toutes les fonctions nécessaires pour éviter les problèmes d'import
+ClassPBBWeb.py - Version avec métrique unique
+Utilise une seule requête Prometheus pour récupérer toutes les informations
 """
 
 import json
@@ -11,9 +11,13 @@ import subprocess
 import concurrent.futures
 import time
 import requests
+import urllib3
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Union
+
+# Désactiver les warnings SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ===== FONCTIONS COPIÉES POUR ÉVITER LES IMPORTS =====
 
@@ -62,7 +66,6 @@ def snmp_request(host, oid):
 def get_pbb_monitoring_info(hostname):
     """Version simplifiée de SpectrumPBB"""
     try:
-        # Simuler les vérifications Spectrum et Cacti
         dns = find_dns(hostname)
         if dns:
             return {
@@ -80,17 +83,6 @@ def get_pbb_monitoring_info(hostname):
             "cacti": f"Erreur: {str(e)}"
         }
 
-# Patterns d'équipements (version simplifiée)
-equipment_patterns = [
-    {"pattern": r'Cisco IOS XR Software \(8000\)', "type": "CISCO", "model": "Cisco 8201-32FH"},
-    {"pattern": r'TiMOS.*Nokia 7750', "type": "7750", "model": "Nokia 7750"},
-    {"pattern": r'TiMOS.*Nokia 7250', "type": "7250", "model": "Nokia 7250"},
-    {"pattern": r'TiMOS.*ALCATEL', "type": "ALCATEL", "model": "Alcatel"},
-    {"pattern": r'HUAWEI', "type": "HUAWEI", "model": "Huawei"},
-    {"pattern": r'Cisco IOS Software', "type": "CISCO", "model": "Cisco IOS"},
-]
-
-# Fonctions optiques simplifiées
 def get_optical_power_batch(host, ports, intermediate_host):
     """Version fallback pour les puissances optiques"""
     return {port: {
@@ -134,25 +126,11 @@ class SNMPResponse:
 
 class NetworkEquipment:
     OIDS = {
-        'name': '1.3.6.1.2.1.1.5',  # Seul OID conservé pour récupérer le DNS
+        'name': '1.3.6.1.2.1.1.5',  # OID pour récupérer le FQDN
         'type': '1.3.6.1.2.1.1.1',
-        'interface_status': '1.3.6.1.2.1.2.2.1.8',
-        'interface_admin_status': '1.3.6.1.2.1.2.2.1.7',
-        'interface_desc': '1.3.6.1.2.1.2.2.1.2',
-        'physical_port': '1.3.6.1.2.1.2.2.1.6',
-        'port_alias': '1.3.6.1.2.1.31.1.1.1.18',
     }
     
     PROMETHEUS_BASE_URL = "http://promxy.query.consul:8082/api/v1/query"
-    
-    METRICS_QUERIES = {
-        'interface_status': 'ifMetrics_ifOperStatus',
-        'interface_admin_status': 'ifMetrics_ifAdminStatus',
-        'interface_desc': 'ifMetrics_ifDescr',
-        'interface_alias': 'ifMetrics_ifAlias',
-        'interface_physaddr': 'ifMetrics_ifPhysAddress',
-        'interface_speed': 'ifMetrics_ifHighSpeed',
-    }
 
     def __init__(self, hostname: str, ip: Optional[str] = None, slot: Optional[str] = None, 
                  community: Union[str, List[str]] = None, version: str = '2c', 
@@ -161,6 +139,10 @@ class NetworkEquipment:
         self.ip = ip
         self.slot = slot  
         self.version = version
+        
+        # Initialiser une session requests avec configuration similaire à Service.py
+        self.session = requests.Session()
+        self.session.verify = False  # Désactiver la vérification SSL
         
         print(f"🔍 Recherche du DNS pour {hostname}...")
         self.dns_complet = find_dns(hostname)
@@ -180,7 +162,7 @@ class NetworkEquipment:
         self.intermediate_host = "vma-prddck-104.pau"
         self.max_workers = max_workers
         self._snmp_cache = {}
-        self._fqdn = None  # FQDN récupéré via SNMP
+        self._fqdn = None
 
     def _get_fqdn_from_snmp(self) -> Optional[str]:
         """Récupère le FQDN via SNMP (OID sysName)"""
@@ -196,10 +178,13 @@ class NetworkEquipment:
             output = snmp_request(hostname_to_use, self.OIDS['name'])
             if output and len(output) > 0:
                 result = output.decode('utf-8') if isinstance(output, bytes) else output
-                # Parser la sortie SNMP pour extraire le hostname
                 match = re.search(r'STRING:\s*"?([^"\n]+)"?', result)
                 if match:
-                    self._fqdn = match.group(1).strip()
+                    fqdn_raw = match.group(1).strip()
+                    # Nettoyer le FQDN pour garder seulement le hostname complet
+                    # Exemple: "pbb-man72-01.bcb.axione.fr" ou parfois avec des espaces/caractères parasites
+                    fqdn_clean = fqdn_raw.split()[0] if ' ' in fqdn_raw else fqdn_raw
+                    self._fqdn = fqdn_clean
                     print(f"✅ FQDN récupéré via SNMP: {self._fqdn}")
                     return self._fqdn
                 else:
@@ -209,287 +194,213 @@ class NetworkEquipment:
         except Exception as e:
             print(f"❌ Erreur lors de la récupération du FQDN via SNMP: {e}")
         
+        # Si SNMP échoue, utiliser le DNS complet trouvé
+        if self.dns_complet:
+            print(f"ℹ️  Utilisation du DNS complet comme FQDN: {self.dns_complet}")
+            self._fqdn = self.dns_complet
+            return self._fqdn
+        
         return None
 
-    def _query_prometheus(self, metric_name: str, hostname: str) -> Optional[Dict]:
-        """Exécute une requête Prometheus et retourne les résultats"""
-        try:
-            query = f'{metric_name}{{hostname=~"{hostname}"}}'
-            params = {'query': query}
-            
-            print(f"🔍 Requête Prometheus: {query}")
-            
-            response = requests.get(self.PROMETHEUS_BASE_URL, params=params, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if data.get('status') == 'success' and data.get('data', {}).get('result'):
-                result_count = len(data['data']['result'])
-                print(f"✅ Prometheus {metric_name}: {result_count} résultats")
-                return data['data']['result']
-            else:
-                print(f"⚠️  Prometheus {metric_name}: Aucun résultat")
-            
-            return None
-            
-        except requests.exceptions.Timeout as e:
-            print(f"⏱️  Timeout Prometheus pour {metric_name}: {e}")
-            return None
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Erreur requête Prometheus pour {metric_name}: {e}")
-            return None
-
-    def _parallel_prometheus_queries(self, fqdn: str) -> Dict[str, Optional[List]]:
-        """Exécute plusieurs requêtes Prometheus en parallèle"""
-        print(f"\n📊 Début des requêtes Prometheus pour FQDN: {fqdn}")
-        results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.METRICS_QUERIES)) as executor:
-            future_to_metric = {
-                executor.submit(self._query_prometheus, metric_name, fqdn): key 
-                for key, metric_name in self.METRICS_QUERIES.items()
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_metric):
-                metric_key = future_to_metric[future]
-                try:
-                    results[metric_key] = future.result()
-                except Exception as e:
-                    print(f"❌ Erreur lors de la récupération de {metric_key}: {e}")
-                    results[metric_key] = None
+    def _query_prometheus_unified(self, hostname: str, max_retries: int = 20) -> Optional[List[Dict]]:
+        """Exécute une seule requête Prometheus avec système de retry"""
+        # Construction de la requête simplifiée (sans filtre ifName)
+        query = f'ifMetrics_ifAdminStatus{{hostname=%22{hostname}%22}}'
         
-        print(f"📊 Fin des requêtes Prometheus\n")
-        return results
-
-    def _parse_prometheus_results(self, results: List[Dict]) -> Dict[str, Dict]:
-        """Parse les résultats Prometheus en un dictionnaire indexé par index
+        # Construire l'URL complète
+        full_url = f"{self.PROMETHEUS_BASE_URL}?query={query}"
         
-        Exemple de structure d'entrée:
-        {
-            "metric": {
-                "ifAlias": "...",
-                "ifDescr": "HundredGigE0/0/0/10/0",
-                "ifPhysAddress": "3c:26:e4:4c:6e:50",
-                "index": "78",
-                ...
-            },
-            "value": [1764067798.148, "1"]
+        # Headers similaires à Service.py
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
         }
-        """
-        parsed = {}
         
-        if not results:
-            return parsed
+        # Désactiver les proxies pour cette requête
+        proxies = {
+            'http': None,
+            'https': None
+        }
         
-        for result in results:
-            metric = result.get('metric', {})
-            value_array = result.get('value', [])
+        print(f"🔍 Requête Prometheus:")
+        print(f"   Hostname utilisé: {hostname}")
+        print(f"   Query: {query}")
+        print(f"   URL complète ({len(full_url)} caractères):")
+        print(f"   {repr(full_url)}")
+        print(f"   Headers: {headers}")
+        print(f"   Proxies désactivés: {proxies}")
+        print(f"🔄 Tentatives de récupération (max: {max_retries})...")
+        print("=" * 60)
+        
+        for attempt in range(1, max_retries + 1):
+            print(f"\n⏱️  TENTATIVE {attempt}/{max_retries}")
+            print("-" * 60)
             
-            # La valeur est dans value[1]
-            value = value_array[1] if len(value_array) > 1 else None
-            
-            # L'index est dans metric['index']
-            index = metric.get('index')
-            if not index:
-                continue
-            
-            if index not in parsed:
-                parsed[index] = {
-                    'value': value,
-                    'ifDescr': metric.get('ifDescr', ''),
-                    'ifAlias': metric.get('ifAlias', ''),
-                    'ifName': metric.get('ifName', ''),
-                    'ifPhysAddress': metric.get('ifPhysAddress', ''),
-                    'ifType': metric.get('ifType', ''),
-                    'metric': metric
-                }
-            else:
-                # Mettre à jour avec les nouvelles informations
-                parsed[index]['value'] = value
-                parsed[index]['metric'].update(metric)
-        
-        return parsed
-
-    def _snmp_walk(self, oid: str) -> Optional[str]:
-        """SNMP walk avec mise en cache (utilisé en fallback)"""
-        if oid in self._snmp_cache:
-            return self._snmp_cache[oid]
-            
-        hostname_to_use = self.dns_complet if self.dns_complet else self.hostname
-        
-        print(f"🔍 SNMP walk sur {hostname_to_use} pour OID {oid}")
-        
-        try:
-            output = snmp_request(hostname_to_use, oid)
-            if output and len(output) > 0:
-                result = output.decode('utf-8') if isinstance(output, bytes) else output
-                self._snmp_cache[oid] = result
-                print(f"✅ SNMP walk réussi pour OID {oid}")
-                return result
-            else:
-                print(f"⚠️  SNMP walk vide pour OID {oid}")
-        except Exception as e:
-            print(f"❌ Erreur SNMP walk pour OID {oid}: {e}")
-        
-        return None
-
-    def _parallel_snmp_walks(self, oids: List[str]) -> Dict[str, Optional[str]]:
-        """Exécute plusieurs SNMP walks en parallèle (utilisé en fallback)"""
-        print(f"\n📊 Début des requêtes SNMP (fallback) pour {len(oids)} OIDs")
-        results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(oids)) as executor:
-            future_to_oid = {executor.submit(self._snmp_walk, oid): oid for oid in oids}
-            for future in concurrent.futures.as_completed(future_to_oid):
-                oid = future_to_oid[future]
-                try:
-                    results[oid] = future.result()
-                except Exception as e:
-                    print(f"❌ Erreur SNMP pour OID {oid}: {e}")
-                    results[oid] = None
-        print(f"📊 Fin des requêtes SNMP\n")
-        return results
-
-    def _extract_port_number(self, description: str) -> Optional[str]:
-        patterns = [
-            r'(\d+/\d+/\d+/\d+/\d+)',  
-            r'(\d+/\d+/\d+/\d+)',      
-            r'[Pp]ort[:\s-]*(\d+/\d+/\d+/\d+/\d+)',  
-            r'[Pp]ort[:\s-]*(\d+/\d+/\d+/\d+)',      
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, description)
-            if match:
-                return match.group(1)
-        return None
-
-    def _clean_value(self, value: str) -> str:
-        value = value.strip('"')
-        for prefix in ['INTEGER: ', 'STRING: ', 'Hex-STRING: ', 'Hex-']:
-            value = value.replace(prefix, '')
-        return value.strip()
-
-    def _parse_snmp_output_with_debug(self, output: str, oid_type: str) -> List[Dict]:
-        if not output:
-            return []
-        
-        responses = []
-        
-        for line in output.splitlines():
-            patterns = [
-                r'([\w-]+::[\w.]+)\.(\d+)\s+=\s+(.+)',
-                r'([\w-]+::[\w.]+)(?:\[(\d+)\])?\s+=\s+(.+)',
-                r'([\w-]+::[\w.]+)\s+=\s+(?:(?:index\s+)?(\d+):\s+)?(.+)'
-            ]
-            
-            matched = False
-            for pattern in patterns:
-                match = re.match(pattern, line)
-                if match:
-                    matched = True
-                    index = match.group(2)
-                    value = self._clean_value(match.group(3))
-                    responses.append({
-                        'oid': match.group(1),
-                        'index': index,
-                        'value': value,
-                        'raw_output': line
-                    })
-                    break
-            
-            if not matched:
-                num_match = re.search(r'\.(\d+)\s+=', line)
-                if num_match:
-                    index = num_match.group(1)
-                    value_match = re.search(r'=\s+(.+)$', line)
-                    value = self._clean_value(value_match.group(1)) if value_match else "Unknown"
-                    oid_match = re.search(r'^([\w-]+::[\w.]+)', line)
-                    oid = oid_match.group(1) if oid_match else "Unknown"
-                    
-                    responses.append({
-                        'oid': oid,
-                        'index': index,
-                        'value': value,
-                        'raw_output': line
-                    })
-        
-        return responses
-
-    def _get_bandwidth(self, description: str, speed: Optional[str] = None) -> str:
-        """Détermine la bande passante à partir de la description ou de la vitesse"""
-        if speed:
             try:
-                speed_mbps = int(speed)
-                if speed_mbps >= 400000:
-                    return "400G"
-                elif speed_mbps >= 100000:
-                    return "100G"
-                elif speed_mbps >= 10000:
-                    return "10G"
-                elif speed_mbps >= 1000:
-                    return "1G"
-            except (ValueError, TypeError):
-                pass
-        
-        if "FourHundredGigE" in description or "Fo" in description:
-            return "400G"
-        elif "HundredGigE" in description or "Hu" in description:
-            return "100G"
-        elif "TenGigE" in description or "Te" in description:
-            return "10G"
-        elif "GigabitEthernet" in description or "Gi" in description:
-            return "1G"
-        return "Unknown"
-
-    def _parse_type_info(self, type_value: str) -> tuple:  
-        type_value = type_value.strip('"')  
-        parts = type_value.split(',', 1)  
-        
-        if len(parts) == 2:
-            software_type = parts[0].strip()   
-            version_full = parts[1].strip()  
-            
-            if "Version" in version_full:
-                version_parts = version_full.split(" ")
-                if len(version_parts) >= 2 and "Version" == version_parts[0]:
-                    return software_type, version_parts[1]
-            
-            return software_type, version_full
-        else:
-            return type_value, ""  
-
-    def _find_equipment_model(self, snmp_type_output: str) -> str:
-        """Détermine le modèle d'équipement basé sur la sortie SNMP et le hostname"""
-        
-        if "Cisco IOS XR Software (8000)" in snmp_type_output:
-            hostname_lower = self.hostname.lower()
-            if hostname_lower.startswith('abr'):
-                return "Cisco 8201-24H8FH"
-            else:
-                return "Cisco 8201-32FH"
-        
-        for pattern_info in equipment_patterns:
-            match = re.search(pattern_info["pattern"], snmp_type_output)
-            if match:
-                if pattern_info.get("model") and pattern_info["model"] != "Unknown" and pattern_info["model"] is not None:
-                    return pattern_info["model"]
-        
-        for pattern_info in equipment_patterns:
-            match = re.search(pattern_info["pattern"], snmp_type_output)
-            if match and pattern_info.get("type"):
-                return pattern_info["type"]
+                print(f"📤 Envoi de la requête GET avec session (sans proxy)...")
+                print(f"   URL: {full_url[:120]}{'...' if len(full_url) > 120 else ''}")
                 
+                # Mesurer le temps de la requête
+                request_start = time.time()
+                
+                # Utiliser self.session avec proxies désactivés
+                response = self.session.get(full_url, headers=headers, proxies=proxies, timeout=30)
+                
+                request_time = time.time() - request_start
+                
+                print(f"📥 Réponse reçue en {request_time:.2f}s")
+                print(f"   Status HTTP: {response.status_code}")
+                print(f"   Taille réponse: {len(response.content)} bytes")
+                print(f"   URL effective: {response.url}")
+                
+                # Vérifier l'URL effective
+                if response.url != full_url:
+                    print(f"⚠️  URL redirigée vers: {response.url}")
+                
+                response.raise_for_status()
+                
+                print(f"🔍 Parsing JSON...")
+                data = response.json()
+                
+                print(f"📊 Contenu JSON:")
+                print(f"   Status: {data.get('status', 'N/A')}")
+                
+                if 'data' in data:
+                    print(f"   Data présent: Oui")
+                    if 'result' in data.get('data', {}):
+                        result_count = len(data['data']['result'])
+                        print(f"   Nombre de résultats: {result_count}")
+                        
+                        if result_count > 0:
+                            print(f"   Premier résultat (aperçu):")
+                            first_result = data['data']['result'][0]
+                            print(f"      Metric: {first_result.get('metric', {}).get('ifName', 'N/A')}")
+                            print(f"      Value: {first_result.get('value', ['N/A'])[1] if len(first_result.get('value', [])) > 1 else 'N/A'}")
+                            
+                            print(f"✅ SUCCÈS: {result_count} résultats récupérés")
+                            return data['data']['result']
+                        else:
+                            print(f"⚠️  Résultat vide (0 interfaces trouvées)")
+                    else:
+                        print(f"   Result présent: Non")
+                        print(f"   Contenu data: {data.get('data', {})}")
+                else:
+                    print(f"   Data présent: Non")
+                    print(f"   Contenu complet: {data}")
+                
+                print(f"⏳ Aucune donnée exploitable, attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                    
+            except requests.exceptions.Timeout as e:
+                print(f"❌ TIMEOUT après 30s")
+                print(f"   Erreur: {str(e)}")
+                print(f"   Type: {type(e).__name__}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                
+            except requests.exceptions.HTTPError as e:
+                print(f"❌ ERREUR HTTP")
+                print(f"   Status code: {response.status_code}")
+                print(f"   Raison: {response.reason}")
+                print(f"   Erreur: {str(e)}")
+                try:
+                    error_data = response.json()
+                    print(f"   Réponse JSON erreur: {error_data}")
+                except:
+                    print(f"   Réponse texte erreur: {response.text[:200]}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                
+            except requests.exceptions.RequestException as e:
+                print(f"❌ ERREUR REQUÊTE")
+                print(f"   Type: {type(e).__name__}")
+                print(f"   Erreur: {str(e)}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                
+            except json.JSONDecodeError as e:
+                print(f"❌ ERREUR PARSING JSON")
+                print(f"   Erreur: {str(e)}")
+                print(f"   Réponse brute (100 premiers caractères): {response.text[:100]}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+                
+            except Exception as e:
+                print(f"❌ ERREUR INATTENDUE")
+                print(f"   Type: {type(e).__name__}")
+                print(f"   Erreur: {str(e)}")
+                import traceback
+                print(f"   Traceback: {traceback.format_exc()[:300]}")
+                print(f"⏳ Attente de 2s avant nouvelle tentative...")
+                time.sleep(2)
+        
+        print("\n" + "=" * 60)
+        print(f"❌ ÉCHEC DÉFINITIF après {max_retries} tentatives")
+        print(f"   Basculement vers SNMP...")
+        print("=" * 60)
+        return None
+
+    def _extract_bandwidth_from_ifname(self, ifname: str) -> str:
+        """Extrait le débit depuis le nom de l'interface"""
+        # Cisco/PBB
+        if "FourHundredGigE" in ifname or ifname.startswith("Fo"):
+            return "400G"
+        elif "HundredGigE" in ifname or ifname.startswith("Hu"):
+            return "100G"
+        elif "TenGigE" in ifname or ifname.startswith("Te"):
+            return "10G"
+        elif "GigabitEthernet" in ifname or ifname.startswith("Gi"):
+            return "1G"
+        elif "FastEthernet" in ifname or ifname.startswith("Fa"):
+            return "100M"
+        
+        # Nokia
+        elif ifname.startswith("1/1/c") or ifname.startswith("1/1/x"):
+            # Ports Nokia haute vitesse (ex: 1/1/c1/1)
+            if "/c" in ifname:
+                return "100G"
+            elif "/x" in ifname:
+                return "10G"
+        
+        # Huawei
+        elif "XGigabitEthernet" in ifname or "XGE" in ifname:
+            return "10G"
+        elif "GE" in ifname and not "XGE" in ifname:
+            return "1G"
+        elif "40GE" in ifname:
+            return "40G"
+        elif "100GE" in ifname:
+            return "100G"
+        
+        # Juniper
+        elif "xe-" in ifname:
+            return "10G"
+        elif "et-" in ifname:
+            return "40G" if "40g" in ifname.lower() else "100G"
+        elif "ge-" in ifname:
+            return "1G"
+        
+        # Patterns génériques basés sur des nombres
+        elif "10g" in ifname.lower() or "10-gig" in ifname.lower():
+            return "10G"
+        elif "100g" in ifname.lower() or "100-gig" in ifname.lower():
+            return "100G"
+        elif "40g" in ifname.lower() or "40-gig" in ifname.lower():
+            return "40G"
+        elif "1g" in ifname.lower() or "1-gig" in ifname.lower():
+            return "1G"
+        
         return "Unknown"
 
-    def get_bundle_info_equipment(self) -> Dict[str, Dict]:
-        """Récupère les informations des bundles pour cet équipement"""
-        try:
-            bundle_info = get_bundle_info(self.dns_complet, self.intermediate_host)
-            return bundle_info
-        except Exception as e:
-            return {}
-
-    def _normalize_port_name(self, port_name: str) -> str:
-        """Normalise un nom de port en retirant les préfixes et en ajoutant 0/0/0/ si nécessaire"""
+    def _normalize_port_name(self, port_name: str, vendor: str = "Cisco") -> str:
+        """Normalise un nom de port en fonction du vendor"""
+        
+        # Pour les équipements non-Cisco, retourner le port tel quel
+        if vendor not in ["Cisco", "Unknown"]:
+            return port_name
+        
+        # Normalisation Cisco uniquement
         prefixes_to_remove = [
             'HundredGigE', 'Hu', 'FH',
             'TenGigE', 'Te',
@@ -505,6 +416,7 @@ class NetworkEquipment:
                 port_clean = port_clean[len(prefix):]
                 break
         
+        # Ajouter 0/0/0/ uniquement si nécessaire pour Cisco
         if port_clean and not port_clean.startswith('0/0/0/'):
             port_clean = f"0/0/0/{port_clean}"
         
@@ -535,6 +447,254 @@ class NetworkEquipment:
                     
         return bundle_info
 
+    def _process_ports_via_prometheus(self, prometheus_results: List[Dict], 
+                                      bundle_data: Dict[str, Dict], 
+                                      target_port: Optional[str]) -> tuple:
+        """Traite les ports depuis les résultats Prometheus"""
+        ports_up = []
+        ports_info_temp = []
+        
+        print(f"📊 Analyse de {len(prometheus_results)} résultats Prometheus...")
+        
+        filtered_stats = {
+            'total': len(prometheus_results),
+            'down': 0,
+            'optics': 0,
+            'pbb_filter': 0,
+            'target_filter': 0,
+            'bandwidth_unknown': 0,
+            'accepted': 0
+        }
+        
+        for result in prometheus_results:
+            metric = result.get('metric', {})
+            value_array = result.get('value', [])
+            
+            # Récupération des données
+            ifname = metric.get('ifName', '')
+            ifalias = metric.get('ifAlias', '').strip('"')  # Retirer les guillemets pour Huawei/Nokia
+            ifphysaddr = metric.get('ifPhysAddress', '')
+            model = metric.get('model', 'Unknown')
+            vendor = metric.get('vendor', 'Unknown')
+            category = metric.get('category', 'Unknown')
+            admin_status = value_array[1] if len(value_array) > 1 else '2'
+            
+            # Debug pour le premier port
+            if filtered_stats['total'] == len(prometheus_results):
+                print(f"\n🔍 Exemple de port analysé:")
+                print(f"   ifName: {ifname}")
+                print(f"   ifAlias: {ifalias}")
+                print(f"   vendor: {vendor}")
+                print(f"   category: {category}")
+                print(f"   admin_status: {admin_status}")
+            
+            # Filtre 1: Si le port est down (2), on skip
+            if admin_status == '2':
+                filtered_stats['down'] += 1
+                continue
+            
+            # Filtre 2: Si c'est un Optics dans la description, on skip
+            if 'optics' in ifalias.lower():
+                filtered_stats['optics'] += 1
+                continue
+            
+            # Filtre 3: Pour les équipements PBB (Cisco), vérifier si c'est bien une interface 0/0/0
+            # Pour les autres, pas de filtre spécifique sur le format du port
+            if category == "PBB" and '0/0/0' not in ifname:
+                filtered_stats['pbb_filter'] += 1
+                continue
+            
+            # Normalisation du port en fonction du vendor
+            port_number = self._normalize_port_name(ifname, vendor)
+            
+            # Filtrage par port cible si spécifié
+            if target_port:
+                if self.slot and port_number != target_port:
+                    filtered_stats['target_filter'] += 1
+                    continue
+                elif not self.slot and not port_number.startswith(target_port):
+                    filtered_stats['target_filter'] += 1
+                    continue
+            
+            # Détermination du débit
+            bandwidth = self._extract_bandwidth_from_ifname(ifname)
+            
+            # Si bandwidth Unknown, afficher un warning mais accepter quand même le port
+            if bandwidth == "Unknown":
+                print(f"⚠️  Bandwidth inconnu pour: {ifname} (vendor: {vendor})")
+                # Ne pas skip, juste mettre "Unknown"
+                # filtered_stats['bandwidth_unknown'] += 1
+                # continue
+            
+            # Informations bundle (principalement pour Cisco/PBB)
+            bundle_info = self._get_port_bundle_info(port_number, bundle_data)
+            
+            # Construction de la description avec le débit
+            description = f"{ifname} ({bandwidth})"
+            
+            # Statut (1 = up)
+            status = "up"
+            
+            port_info = {
+                "port": port_number,
+                "description": description,
+                "model": model,
+                "vendor": vendor,
+                "category": category,
+                "alias": ifalias,
+                "status": status,
+                "admin_status": status,
+                "physical_address": ifphysaddr,
+                "bandwidth": bandwidth
+            }
+            
+            # Ajouter les infos bundle uniquement si disponibles
+            if bundle_info["bundle"] != "N/A" and bundle_info["status_bundle"].lower() in ["up", "active"]:
+                port_info.update({
+                    "bundle": bundle_info["bundle"],
+                    "status_bundle": bundle_info["status_bundle"],
+                    "state": bundle_info["state"]
+                })
+            
+            ports_info_temp.append(port_info)
+            ports_up.append(port_number)
+            filtered_stats['accepted'] += 1
+        
+        # Afficher les statistiques de filtrage
+        print(f"\n📊 Statistiques de filtrage:")
+        print(f"   Total interfaces: {filtered_stats['total']}")
+        print(f"   ❌ Down (status=2): {filtered_stats['down']}")
+        print(f"   ❌ Optics: {filtered_stats['optics']}")
+        print(f"   ❌ PBB sans 0/0/0: {filtered_stats['pbb_filter']}")
+        print(f"   ❌ Filtrage port cible: {filtered_stats['target_filter']}")
+        print(f"   ⚠️  Bandwidth inconnu: {filtered_stats['bandwidth_unknown']}")
+        print(f"   ✅ Acceptés: {filtered_stats['accepted']}")
+        
+        return ports_info_temp, ports_up
+
+    def _process_ports_via_snmp(self, bundle_data: Dict[str, Dict], 
+                                target_port: Optional[str]) -> tuple:
+        """Traite les ports via SNMP (fallback)"""
+        print("📡 Récupération SNMP des interfaces...")
+        
+        # OIDs nécessaires
+        oids_to_fetch = [
+            '1.3.6.1.2.1.2.2.1.8',   # interface_status
+            '1.3.6.1.2.1.2.2.1.7',   # interface_admin_status
+            '1.3.6.1.2.1.2.2.1.2',   # interface_desc
+            '1.3.6.1.2.1.2.2.1.6',   # physical_port
+            '1.3.6.1.2.1.31.1.1.1.18' # port_alias
+        ]
+        
+        hostname_to_use = self.dns_complet if self.dns_complet else self.hostname
+        
+        # Récupération parallèle
+        snmp_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(oids_to_fetch)) as executor:
+            future_to_oid = {
+                executor.submit(snmp_request, hostname_to_use, oid): oid 
+                for oid in oids_to_fetch
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_oid):
+                oid = future_to_oid[future]
+                try:
+                    output = future.result()
+                    result = output.decode('utf-8') if isinstance(output, bytes) else output
+                    snmp_results[oid] = result
+                except Exception as e:
+                    print(f"❌ Erreur SNMP pour OID {oid}: {e}")
+                    snmp_results[oid] = ""
+        
+        # Parser les résultats
+        def parse_snmp(output):
+            if not output:
+                return {}
+            results = {}
+            for line in output.splitlines():
+                match = re.search(r'\.(\d+)\s+=\s+(?:INTEGER:\s*)?(?:STRING:\s*"?)?([^"\n]+)', line)
+                if match:
+                    results[match.group(1)] = match.group(2).strip('"').strip()
+            return results
+        
+        status_dict = parse_snmp(snmp_results.get(oids_to_fetch[0], ''))
+        admin_status_dict = parse_snmp(snmp_results.get(oids_to_fetch[1], ''))
+        desc_dict = parse_snmp(snmp_results.get(oids_to_fetch[2], ''))
+        physical_dict = parse_snmp(snmp_results.get(oids_to_fetch[3], ''))
+        alias_dict = parse_snmp(snmp_results.get(oids_to_fetch[4], ''))
+        
+        ports_up = []
+        ports_info_temp = []
+        
+        for idx in desc_dict.keys():
+            desc_value = desc_dict[idx]
+            port_number = self._extract_port_number(desc_value) or f"index_{idx}"
+            
+            status_val = status_dict.get(idx, '2')
+            admin_status_val = admin_status_dict.get(idx, '2')
+            status = "up" if status_val == "1" else "down"
+            admin_status = "up" if admin_status_val == "1" else "down"
+            
+            physical_address = physical_dict.get(idx, 'Unknown').replace(" ", ":")
+            alias = alias_dict.get(idx, 'Unknown')
+            
+            # Filtres SNMP
+            if status == "down" and admin_status == "down" and (not alias or alias in ["Unknown", "", "N/A"]):
+                continue
+            
+            if 'optics' in alias.lower():
+                continue
+            
+            # Filtrage par port cible
+            if target_port:
+                if self.slot and port_number != target_port:
+                    continue
+                elif not self.slot and not port_number.startswith(target_port):
+                    continue
+            
+            bandwidth = self._extract_bandwidth_from_ifname(desc_value)
+            if bandwidth == "Unknown":
+                continue
+            
+            bundle_info = self._get_port_bundle_info(port_number, bundle_data)
+            
+            port_info = {
+                "port": port_number,
+                "description": f"{desc_value} ({bandwidth})",
+                "model": "Unknown",  # Non disponible via SNMP simple
+                "alias": alias,
+                "status": status,
+                "admin_status": admin_status,
+                "physical_address": physical_address,
+                "bandwidth": bandwidth
+            }
+            
+            if bundle_info["bundle"] != "N/A" and bundle_info["status_bundle"].lower() in ["up", "active"]:
+                port_info.update({
+                    "bundle": bundle_info["bundle"],
+                    "status_bundle": bundle_info["status_bundle"],
+                    "state": bundle_info["state"]
+                })
+            
+            ports_info_temp.append(port_info)
+            if status == "up":
+                ports_up.append(port_number)
+        
+        return ports_info_temp, ports_up
+
+    def _extract_port_number(self, description: str) -> Optional[str]:
+        patterns = [
+            r'(\d+/\d+/\d+/\d+/\d+)',  
+            r'(\d+/\d+/\d+/\d+)',      
+            r'[Pp]ort[:\s-]*(\d+/\d+/\d+/\d+/\d+)',  
+            r'[Pp]ort[:\s-]*(\d+/\d+/\d+/\d+)',      
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, description)
+            if match:
+                return match.group(1)
+        return None
+
     def _get_default_optical_values(self) -> Dict:
         """Retourne les valeurs optiques par défaut"""
         return {
@@ -559,43 +719,21 @@ class NetworkEquipment:
             }
         }
 
+    def get_bundle_info_equipment(self) -> Dict[str, Dict]:
+        """Récupère les informations des bundles pour cet équipement"""
+        try:
+            bundle_info = get_bundle_info(self.dns_complet, self.intermediate_host)
+            return bundle_info
+        except Exception as e:
+            return {}
+
     def get_optical_power_values_batch(self, ports: List[str]) -> Dict[str, Dict]:
-        """Récupère les puissances optiques pour plusieurs ports en une seule connexion SSH"""
+        """Récupère les puissances optiques pour plusieurs ports"""
         try:
             optical_data = get_optical_power_batch(self.dns_complet, ports, self.intermediate_host)
             return optical_data
         except Exception as e:
             return {port: self._get_default_optical_values() for port in ports}
-
-    def get_optical_power_values(self) -> Dict[str, Union[str, Dict[str, str]]]:
-        """Version compatible pour un seul port (rétrocompatibilité)"""
-        try:
-            optical_data = get_optical_power(self.dns_complet, self.port, self.intermediate_host)
-            return {
-                "signal_optique_rx": optical_data['rx'],
-                "signal_optique_tx": optical_data['tx'],
-                "type_sfp": {
-                    "PID": optical_data['pid'],
-                    "Optics type": optical_data['optics_type'],
-                    "Name": optical_data['name'],
-                    "Part Number": optical_data['part_number']  
-                },
-                "fec_state": optical_data['fec_state'],
-                "wavelength": optical_data['wavelength'],
-                "alarm_status": optical_data['alarm_status'],
-                "led_state": optical_data['led_state'],        
-                "laser_state": optical_data['laser_state'],    
-                "threshold": {
-                    "rx_high": optical_data['rx_threshold_high'],
-                    "rx_low": optical_data['rx_threshold_low'],
-                    "tx_high": optical_data['tx_threshold_high'],
-                    "tx_low": optical_data['tx_threshold_low']
-                }
-            }
-        except Exception as e:
-            return self._get_default_optical_values()
-        finally:
-            close_all_connections()
 
     def get_equipment_info(self) -> dict:
         print("\n" + "="*60)
@@ -616,10 +754,10 @@ class NetworkEquipment:
             monitoring_info = get_pbb_monitoring_info(self.hostname)
             info["equipment_info"].update(monitoring_info)
         except Exception as e:
-            info["equipment_info"]["spectrum"] = f"Erreur lors de la récupération Spectrum: {str(e)}"
-            info["equipment_info"]["cacti"] = f"Erreur lors de la récupération Cacti: {str(e)}"
+            info["equipment_info"]["spectrum"] = f"Erreur: {str(e)}"
+            info["equipment_info"]["cacti"] = f"Erreur: {str(e)}"
 
-        # ÉTAPE 1: Récupérer le FQDN via SNMP EN PREMIER
+        # ÉTAPE 1: Récupérer le FQDN via SNMP
         print("\n📍 ÉTAPE 1: Récupération du FQDN")
         print("-" * 60)
         fqdn = self._get_fqdn_from_snmp()
@@ -630,23 +768,19 @@ class NetworkEquipment:
         
         print(f"✅ FQDN final utilisé: {fqdn}")
 
-        # ÉTAPE 2: Tentative de récupération via Prometheus
-        print("\n📍 ÉTAPE 2: Requêtes Prometheus")
+        # ÉTAPE 2: Récupération via Prometheus (méthode unifiée avec retry)
+        print("\n📍 ÉTAPE 2: Requête Prometheus unifiée avec retry")
         print("-" * 60)
+        
+        prometheus_results = self._query_prometheus_unified(fqdn)
+        
         use_snmp_fallback = False
-        metrics_results = self._parallel_prometheus_queries(fqdn)
-        
-        # Vérifier si les métriques sont disponibles
-        successful_metrics = sum(1 for v in metrics_results.values() if v is not None and len(v) > 0)
-        total_metrics = len(metrics_results)
-        
-        print(f"📊 Résultats Prometheus: {successful_metrics}/{total_metrics} métriques récupérées")
-        
-        if successful_metrics == 0:
-            print("⚠️  Aucune métrique Prometheus disponible, basculement vers SNMP")
+        if not prometheus_results:
+            print("⚠️  Prometheus n'a retourné aucune donnée après 20 tentatives")
+            print("🔄 Basculement vers SNMP...")
             use_snmp_fallback = True
         else:
-            print(f"✅ Utilisation de Prometheus ({successful_metrics} métriques disponibles)")
+            print(f"✅ {len(prometheus_results)} interfaces récupérées via Prometheus")
 
         # ÉTAPE 3: Récupération des bundles
         print("\n📍 ÉTAPE 3: Récupération des bundles")
@@ -654,177 +788,55 @@ class NetworkEquipment:
         bundle_data = self.get_bundle_info_equipment()
         if bundle_data:
             print(f"✅ {len(bundle_data)} bundles trouvés")
+            
+            for bundle_name, data in bundle_data.items():
+                lag_info = {
+                    "bundle_name": bundle_name,
+                    "status": data.get('status', 'N/A'),
+                    "ports": []
+                }
+                
+                for port in data.get('ports', []):
+                    port_name = port.get('port', 'N/A')
+                    port_clean = self._normalize_port_name(port_name)
+                    
+                    lag_info["ports"].append({
+                        "port": port_clean,
+                        "state": port.get('state', 'N/A')
+                    })
+                
+                info["lags"].append(lag_info)
         else:
             print("ℹ️  Aucun bundle trouvé")
-        
-        for bundle_name, data in bundle_data.items():
-            lag_info = {
-                "bundle_name": bundle_name,
-                "status": data.get('status', 'N/A'),
-                "ports": []
-            }
-            
-            for port in data.get('ports', []):
-                port_name = port.get('port', 'N/A')
-                port_clean = self._normalize_port_name(port_name)
-                
-                lag_info["ports"].append({
-                    "port": port_clean,
-                    "state": port.get('state', 'N/A')
-                })
-            
-            info["lags"].append(lag_info)
 
-        # ÉTAPE 4: Récupération des informations d'équipement (type et version)
-        print("\n📍 ÉTAPE 4: Récupération du type d'équipement")
-        print("-" * 60)
-        type_output = self._snmp_walk(self.OIDS['type'])
-        type_info = self._parse_snmp_output_with_debug(type_output, 'type') if type_output else []
-        
-        if type_info and len(type_info) > 0:
-            type_str, version_str = self._parse_type_info(type_info[0]['value'])
-            raw_snmp_output = type_info[0]['raw_output']
-            model = self._find_equipment_model(raw_snmp_output)
-            info["equipment_info"]["type"] = model if model != "Unknown" else type_str
-            info["equipment_info"]["Version"] = version_str
-            print(f"✅ Type: {info['equipment_info']['type']}")
-            print(f"✅ Version: {info['equipment_info']['Version']}")
-        else:
-            print("⚠️  Impossible de récupérer le type d'équipement")
-
-        # ÉTAPE 5: Traitement des ports
-        print("\n📍 ÉTAPE 5: Récupération des ports")
+        # ÉTAPE 4: Traitement des ports
+        print("\n📍 ÉTAPE 4: Traitement des ports")
         print("-" * 60)
         
-        if use_snmp_fallback:
-            print("🔄 Mode SNMP (fallback)")
-            # Utiliser SNMP comme fallback
-            oids_to_fetch = [
-                self.OIDS['interface_status'],
-                self.OIDS['interface_admin_status'],
-                self.OIDS['interface_desc'],
-                self.OIDS['physical_port'],
-                self.OIDS['port_alias']
-            ]
-            snmp_results = self._parallel_snmp_walks(oids_to_fetch)
-            
-            interface_status = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['interface_status'], ''), 'interface_status')
-            interface_admin_status = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['interface_admin_status'], ''), 'interface_admin_status')
-            interface_desc = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['interface_desc'], ''), 'interface_desc')
-            physical_port = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['physical_port'], ''), 'physical_port')
-            port_alias = self._parse_snmp_output_with_debug(snmp_results.get(self.OIDS['port_alias'], ''), 'port_alias')
-
-            status_dict = {item['index']: item for item in interface_status if item['index']}
-            admin_status_dict = {item['index']: item for item in interface_admin_status if item['index']}
-            desc_dict = {item['index']: item for item in interface_desc if item['index']}
-            physical_dict = {item['index']: item for item in physical_port if item['index']}
-            alias_dict = {item['index']: item for item in port_alias if item['index']}
-            
-            print(f"✅ SNMP: {len(desc_dict)} interfaces trouvées")
-        else:
-            print("🔄 Mode Prometheus")
-            # Utiliser les métriques Prometheus
-            status_dict = self._parse_prometheus_results(metrics_results.get('interface_status', []))
-            admin_status_dict = self._parse_prometheus_results(metrics_results.get('interface_admin_status', []))
-            desc_dict = self._parse_prometheus_results(metrics_results.get('interface_desc', []))
-            physical_dict = self._parse_prometheus_results(metrics_results.get('interface_physaddr', []))
-            alias_dict = self._parse_prometheus_results(metrics_results.get('interface_alias', []))
-            speed_dict = self._parse_prometheus_results(metrics_results.get('interface_speed', []))
-            
-            print(f"✅ Prometheus: {len(desc_dict)} interfaces trouvées")
-
         target_port = self.ip
         if self.slot:
             target_port = f"{self.ip}/{self.slot}" if self.ip else None
         
         if target_port:
             print(f"🎯 Filtrage sur le port: {target_port}")
-            
+        
         ports_up = []
         ports_info_temp = []
         
-        print(f"\n🔍 Analyse des ports...")
+        if use_snmp_fallback:
+            print("🔄 Utilisation de SNMP (fallback)")
+            # Code SNMP fallback ici
+            ports_info_temp, ports_up = self._process_ports_via_snmp(bundle_data, target_port)
+        else:
+            print("🔄 Utilisation de Prometheus")
+            ports_info_temp, ports_up = self._process_ports_via_prometheus(prometheus_results, bundle_data, target_port)
         
-        for idx in desc_dict.keys():
-            if use_snmp_fallback:
-                # Mode SNMP
-                desc_item = desc_dict[idx]
-                port_number = self._extract_port_number(desc_item['value']) or f"index_{idx}"
-                status = status_dict.get(idx, {}).get('value', 'Unknown')
-                admin_status = admin_status_dict.get(idx, {}).get('value', 'Unknown')
-                physical_address = physical_dict.get(idx, {}).get('value', 'Unknown').replace(" ", ":")
-                alias = alias_dict.get(idx, {}).get('value', 'Unknown')
-                bandwidth = self._get_bandwidth(desc_item['value'])
-                
-                status = "up" if status == "1" else "down"
-                admin_status = "up" if admin_status == "1" else "down"
-            else:
-                # Mode Prometheus
-                desc_data = desc_dict[idx]
-                
-                # Extraire ifDescr depuis le dictionnaire parsé
-                desc_value = desc_data.get('ifDescr', '')
-                port_number = self._extract_port_number(desc_value) or f"index_{idx}"
-                
-                # Status : 1 = up, 2 = down
-                status_value = status_dict.get(idx, {}).get('value', '2')
-                status = "up" if status_value == "1" else "down"
-                
-                admin_status_value = admin_status_dict.get(idx, {}).get('value', '2')
-                admin_status = "up" if admin_status_value == "1" else "down"
-                
-                # Adresse physique
-                physical_address = physical_dict.get(idx, {}).get('ifPhysAddress', 'Unknown')
-                
-                # Alias
-                alias = alias_dict.get(idx, {}).get('ifAlias', 'Unknown')
-                
-                # Vitesse pour déterminer la bande passante
-                speed = speed_dict.get(idx, {}).get('value')
-                bandwidth = self._get_bandwidth(desc_value, speed)
-
-            if target_port:
-                if self.slot and port_number != target_port:
-                    continue
-                elif not self.slot and not port_number.startswith(target_port):
-                    continue
-
-            if (status == "down" and admin_status == "down" and 
-                (not alias or alias in ["Unknown", "", "N/A", None])):
-                continue
-            
-            if bandwidth == "Unknown":
-                continue
-                
-            bundle_info = self._get_port_bundle_info(port_number, bundle_data)
-                
-            port_info = {
-                "port": port_number,
-                "bandwidth": bandwidth,
-                "status": status,
-                "admin_status": admin_status,
-                "physical_address": physical_address,
-                "description": alias,
-                "index": idx
-            }
-            
-            if bundle_info["bundle"] != "N/A" and bundle_info["status_bundle"].lower() in ["up", "active"]:
-                port_info.update({
-                    "bundle": bundle_info["bundle"],
-                    "status_bundle": bundle_info["status_bundle"],
-                    "state": bundle_info["state"]
-                })
-            
-            ports_info_temp.append(port_info)
-            
-            if status == "up":
-                ports_up.append(port_number)
-
         print(f"✅ {len(ports_info_temp)} ports valides trouvés")
-        print(f"✅ {len(ports_up)} ports UP")
+        if not use_snmp_fallback:
+            print(f"✅ {len(ports_up)} ports UP")
 
-        # ÉTAPE 6: Récupération des valeurs optiques
-        print("\n📍 ÉTAPE 6: Récupération des valeurs optiques")
+        # ÉTAPE 5: Récupération des valeurs optiques
+        print("\n📍 ÉTAPE 5: Récupération des valeurs optiques")
         print("-" * 60)
         
         optical_values_batch = {}
@@ -835,14 +847,28 @@ class NetworkEquipment:
         else:
             print("ℹ️  Pas de ports UP ou DNS non résolu, valeurs optiques par défaut")
 
-        # ÉTAPE 7: Assemblage final
-        print("\n📍 ÉTAPE 7: Assemblage des données finales")
+        # ÉTAPE 6: Assemblage final
+        print("\n📍 ÉTAPE 6: Assemblage des données finales")
         print("-" * 60)
+        
+        # Récupération du modèle et vendor depuis le premier port (ils ont tous le même)
+        if ports_info_temp:
+            equipment_model = ports_info_temp[0].get('model', 'Unknown')
+            equipment_vendor = ports_info_temp[0].get('vendor', 'Unknown')
+            equipment_category = ports_info_temp[0].get('category', 'Unknown')
+            
+            info["equipment_info"]["type"] = equipment_model
+            info["equipment_info"]["vendor"] = equipment_vendor
+            info["equipment_info"]["category"] = equipment_category
+            
+            print(f"✅ Modèle d'équipement: {equipment_model}")
+            print(f"✅ Vendor: {equipment_vendor}")
+            print(f"✅ Catégorie: {equipment_category}")
         
         for port_info in ports_info_temp:
             port_number = port_info["port"]
             
-            if port_info["status"] == "up" and port_number in optical_values_batch:
+            if port_number in optical_values_batch:
                 optical_values = optical_values_batch[port_number]
             else:
                 optical_values = self._get_default_optical_values()
@@ -855,11 +881,9 @@ class NetworkEquipment:
                 "fec_state": optical_values['fec_state'],
                 "wavelength": optical_values['wavelength'],
                 "alarm_status": optical_values['alarm_status'],
-                "led_state": optical_values['led_state'],        
-                "laser_state": optical_values['laser_state']    
+                "led_state": optical_values['led_state'],
+                "laser_state": optical_values['laser_state']
             })
-            
-            port_info.pop('index', None)
             
             info["ports"].append(port_info)
 
@@ -893,20 +917,19 @@ class NetworkEquipment:
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 ClassPBBWeb - Version Standalone Corrigée")
+    print("🚀 ClassPBBWeb - Version Métrique Unique")
     print("=" * 60)
-    print("ℹ️  Cette version inclut toutes les dépendances")
-    print("ℹ️  Avec messages de debug améliorés")
+    print("ℹ️  Utilise une seule requête Prometheus pour tout récupérer")
+    print("ℹ️  Filtre automatiquement les ports down et Optics")
     print("=" * 60)
     
-    # Demander le nom d'équipement
     equipment_name = input("\n📝 Entrez le nom de l'équipement: ").strip()
     
     if not equipment_name:
         print("❌ Erreur: Nom d'équipement requis")
         exit(1)
     
-    # Demander le port spécifique (optionnel)
+    hostname_override = input("📝 Hostname FQDN (optionnel, laissez vide pour auto-détection): ").strip()
     port_filter = input("📝 Port spécifique (optionnel, ex: 0/0/0/1): ").strip()
     slot_filter = input("📝 Slot spécifique (optionnel): ").strip()
     
@@ -915,14 +938,17 @@ if __name__ == "__main__":
         print("=" * 60)
         start_time = time.time()
         
-        # Créer l'instance
         network_equipment = NetworkEquipment(
             hostname=equipment_name,
             ip=port_filter if port_filter else None,
             slot=slot_filter if slot_filter else None
         )
         
-        # Récupérer les informations
+        # Si l'utilisateur a fourni un hostname, l'utiliser directement
+        if hostname_override:
+            print(f"ℹ️  Utilisation du hostname fourni: {hostname_override}")
+            network_equipment._fqdn = hostname_override
+        
         if port_filter or slot_filter:
             result = {
                 "equipment_info": network_equipment.get_equipment_info()["equipment_info"],
@@ -947,7 +973,6 @@ if __name__ == "__main__":
         print(f"\n❌ Erreur lors de l'exécution: {str(e)}")
         print(f"🔍 Type d'erreur: {type(e).__name__}")
         
-        # Traceback détaillé
         import traceback
         print("\n📋 Traceback complet:")
         print("-" * 40)
