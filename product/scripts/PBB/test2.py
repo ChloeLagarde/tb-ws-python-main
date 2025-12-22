@@ -454,12 +454,16 @@ class NetworkEquipment:
             if 'optics' in ifname.lower():
                 continue
             
-            # Filtre 2: Si port down ET pas de description → skip
-            if status == "down" and (not ifalias or ifalias.strip() in ["", "N/A"]):
+            # Filtre 2: Si pas de description → skip (tous les ports sans description)
+            if not ifalias or ifalias.strip() in ["", "N/A"]:
                 continue
             
             # Filtre 3: Si c'est un Optics dans la description → skip
             if 'optics' in ifalias.lower():
+                continue
+            
+            # Filtre 4: Pour PBB, vérifier 0/0/0
+            if category == "PBB" and '0/0/0' not in ifname:
                 continue
             
             port_number = self._normalize_port_name(ifname, vendor)
