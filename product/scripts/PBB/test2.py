@@ -60,8 +60,13 @@ class NetworkEquipment:
         """Récupère le FQDN via SNMP (OID sysName)"""
         if self._fqdn:
             return self._fqdn
+        
+        # Prioriser le DNS complet trouvé par find_dns()
+        if self.dns_complet:
+            self._fqdn = self.dns_complet
+            return self._fqdn
             
-        hostname_to_use = self.dns_complet if self.dns_complet else self.hostname
+        hostname_to_use = self.hostname
         
         try:
             output = snmp_request(hostname_to_use, self.OIDS['name'])
@@ -75,10 +80,6 @@ class NetworkEquipment:
                     return self._fqdn
         except Exception as e:
             print(f"Erreur lors de la récupération du FQDN via SNMP: {e}")
-        
-        if self.dns_complet:
-            self._fqdn = self.dns_complet
-            return self._fqdn
         
         return None
 
@@ -446,14 +447,19 @@ class NetworkEquipment:
             category = metric.get('category', 'Unknown')
             admin_status = value_array[1] if len(value_array) > 1 else '2'
             
-            # Filtres
-            if admin_status == '2':
+            # Convertir admin_status en up/down
+            status = "up" if admin_status == '1' else "down"
+            
+            # Filtre 1: Si "Optics" dans le nom du port → skip
+            if 'optics' in ifname.lower():
                 continue
             
+            # Filtre 2: Si port down ET pas de description → skip
+            if status == "down" and (not ifalias or ifalias.strip() in ["", "N/A"]):
+                continue
+            
+            # Filtre 3: Si c'est un Optics dans la description → skip
             if 'optics' in ifalias.lower():
-                continue
-            
-            if category == "PBB" and '0/0/0' not in ifname:
                 continue
             
             port_number = self._normalize_port_name(ifname, vendor)
@@ -468,7 +474,6 @@ class NetworkEquipment:
             bundle_info = self._get_port_bundle_info(port_number, bundle_data)
             
             description = ifalias
-            status = "up"
             
             port_info = {
                 "port": port_number,
@@ -490,7 +495,9 @@ class NetworkEquipment:
                 })
             
             ports_info_temp.append(port_info)
-            ports_up.append(port_number)
+            
+            if status == "up":
+                ports_up.append(port_number)
         
         return ports_info_temp, ports_up
 
