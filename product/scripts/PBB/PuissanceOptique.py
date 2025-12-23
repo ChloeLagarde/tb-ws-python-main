@@ -6,6 +6,93 @@ from scripts.SSH import ssh_pbb_cisco, close_ssh_pbb_cisco
 # Connexions SSH globales réutilisables
 ssh_connections = {}
 
+def get_system_info(final_host: str, intermediate_host: str) -> Dict[str, str]:
+    """
+    Récupère les informations système Cisco via SSH.
+    Commandes: show platform, show version, show isis adjacency, show mpls ldp neighbor, show pim interface
+    
+    Returns:
+        dict: {
+            'show_platform': output,
+            'show_version': output,
+            'show_isis': output,
+            'show_ldp': output,
+            'show_pim': output
+        }
+    """
+    results = {
+        'show_platform': 'N/A',
+        'show_version': 'N/A',
+        'show_isis': 'N/A',
+        'show_ldp': 'N/A',
+        'show_pim': 'N/A'
+    }
+    
+    try:
+        # Utiliser la connexion centralisée
+        connection_key = f"{intermediate_host}_{final_host}"
+        
+        if connection_key in ssh_connections and ssh_connections[connection_key]['session'].isalive():
+            session = ssh_connections[connection_key]['session']
+        else:
+            # Créer une nouvelle connexion via SSH.py
+            conn_result = ssh_pbb_cisco(final_host, intermediate_host)
+            session = conn_result['session']
+            ssh_connections[connection_key] = {'session': session}
+
+        # Liste des commandes à exécuter
+        commands = [
+            ('show platform', 'show_platform'),
+            ('show version', 'show_version'),
+            ('show isis adjacency', 'show_isis'),
+            ('show mpls ldp neighbor', 'show_ldp'),
+            ('show pim interface', 'show_pim')
+        ]
+
+        # Exécution de chaque commande
+        for cmd, key in commands:
+            try:
+                session.sendline(cmd)
+                
+                prompt_pattern = r'RP/0/RP0/CPU0:.*#'
+                output = ""
+                
+                # Collecte de la sortie complète
+                start_time = time.time()
+                while True:
+                    index = session.expect([prompt_pattern, '--More--', 'Press any key to continue', 'pexpect.TIMEOUT'], timeout=15)
+                    output += session.before.decode('utf-8', errors='replace')
+                    
+                    if index == 0:
+                        break
+                    elif index in [1, 2]:
+                        session.send(' ')
+                    elif index == 3:
+                        break
+                    
+                    # Protection contre les boucles infinies
+                    if time.time() - start_time > 30:
+                        break
+                
+                # Nettoyer la sortie (retirer la commande elle-même et les lignes vides au début/fin)
+                output_lines = output.strip().split('\n')
+                # Retirer la première ligne si c'est la commande
+                if output_lines and cmd in output_lines[0]:
+                    output_lines = output_lines[1:]
+                
+                cleaned_output = '\n'.join(output_lines).strip()
+                results[key] = cleaned_output if cleaned_output else 'N/A'
+                
+            except Exception as e:
+                results[key] = f'Erreur lors de la récupération: {str(e)}'
+        
+    except Exception as e:
+        for key in results.keys():
+            results[key] = f'Erreur connexion SSH: {str(e)}'
+    
+    return results
+
+
 def get_optical_power_batch(final_host: str, ports: List[str], intermediate_host: str) -> Dict[str, Dict[str, str]]:
     """
     Récupère les puissances optiques pour plusieurs ports en une seule connexion SSH.

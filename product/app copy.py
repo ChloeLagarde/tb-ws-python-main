@@ -335,10 +335,8 @@ class Equipment(Resource):
         
         slot = request.args.get('breakout')
 
-        if re.match('olt-', equipment_name):
-            result = OLT(equipment_name)
         # Sinon si wdm- match
-        elif re.match('wdm-', equipment_name):
+        if re.match('wdm-', equipment_name):
             if IsNokia(equipment_name) == True:
                 result = ScriptNokiaPrincipal(equipment_name)
             elif IsEkinops(equipment_name) == True:
@@ -350,7 +348,7 @@ class Equipment(Resource):
             equipment = NetworkEquipment(equipment_name, ip=port, slot=slot)
             result = equipment.get_equipment_info()
         
-        if port and not re.match('olt-|wdm-', equipment_name):
+        if port and not re.match('wdm-', equipment_name):
             equipment = NetworkEquipment(equipment_name, ip=port, slot=slot)
             filtered_ports = equipment.get_port_info(ip=port, slot=slot)
             if not filtered_ports:

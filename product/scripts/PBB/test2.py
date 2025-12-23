@@ -56,6 +56,28 @@ class NetworkEquipment:
         self.session = requests.Session()
         self.session.verify = False
 
+    def _is_cisco_equipment(self) -> bool:
+        """Vérifie si l'équipement est un équipement Cisco"""
+        hostname_lower = self.hostname.lower()
+        return any(hostname_lower.startswith(prefix) for prefix in ['pbb-', 'abr-', 'lsr-'])
+
+    def get_cisco_system_info(self) -> Dict[str, str]:
+        """Récupère les informations système pour les équipements Cisco uniquement"""
+        if not self._is_cisco_equipment():
+            return {}
+        
+        try:
+            system_info = get_system_info(self.dns_complet, self.intermediate_host)
+            return system_info
+        except Exception as e:
+            return {
+                'show_platform': f'Erreur: {str(e)}',
+                'show_version': f'Erreur: {str(e)}',
+                'show_isis': f'Erreur: {str(e)}',
+                'show_ldp': f'Erreur: {str(e)}',
+                'show_pim': f'Erreur: {str(e)}'
+            }
+
     def _get_fqdn_from_snmp(self) -> Optional[str]:
         """Récupère le FQDN via SNMP (OID sysName)"""
         if self._fqdn:
@@ -566,6 +588,16 @@ class NetworkEquipment:
             model = self._find_equipment_model(raw_snmp_output)
             info["equipment_info"]["type"] = model if model != "Unknown" else type_str
             info["equipment_info"]["Version"] = version_str
+
+        # ===== AJOUT DES INFORMATIONS SYSTÈME CISCO =====
+        if self._is_cisco_equipment():
+            cisco_info = self.get_cisco_system_info()
+            if cisco_info:
+                info["equipment_info"]["show_version"] = cisco_info.get('show_version', 'N/A')
+                info["equipment_info"]["show_platform"] = cisco_info.get('show_platform', 'N/A')
+                info["equipment_info"]["ISIS"] = cisco_info.get('show_isis', 'N/A')
+                info["equipment_info"]["LDP"] = cisco_info.get('show_ldp', 'N/A')
+                info["equipment_info"]["PIM"] = cisco_info.get('show_pim', 'N/A')
 
         target_port = self.ip
         if self.slot:
